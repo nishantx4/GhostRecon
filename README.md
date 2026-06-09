@@ -15,8 +15,8 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![Claude AI](https://img.shields.io/badge/Claude-AI%20Powered-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://anthropic.com)
-[![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
-[![Made by](https://img.shields.io/badge/Made%20by-Nishant-a855f7?style=for-the-badge)](https://github.com/yourusername)
+[![License](https://img.shields.io/badge/License-GPL%20v3-22c55e?style=for-the-badge)](LICENSE)
+[![Made by](https://img.shields.io/badge/Made%20by-Nishant-a855f7?style=for-the-badge)](https://github.com/nishantx4)
 
 *A personal bug bounty hunting companion — built to make recon smarter, faster, and more fun.*
 
@@ -51,7 +51,7 @@ Think of it as your personal ghost that haunts a target and reports back everyth
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/yourusername/ghostrecon.git
+git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
 # 2. Install dependencies
@@ -211,7 +211,7 @@ Got a module idea or a better payload list? PRs are welcome!
 
 <div align="center">
 
-Made with 👻 by **Nishant**
+Made by **Nishant**
 
 *Happy hunting — and always hack ethically!*
 

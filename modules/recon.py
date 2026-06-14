@@ -5,6 +5,7 @@ Feeds XSS, SQLi, and other modules with real data.
 import re
 import time
 import urllib.parse
+import ipaddress
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -84,6 +85,10 @@ class ReconModule(BaseModule):
         # Start crawl
         self.ui.info(f"Crawling {self.base_url} ...")
         self._crawl(self.base_url, depth=2)
+
+        # Start OSINT Gathering (Subdomains & Wayback/OTX URLs)
+        self._enumerate_subdomains()
+        self._find_osint_urls()
 
         # Always seed endpoints with known-injectable probe paths
         # so XSS/SQLi have targets even if the crawl fails
@@ -210,14 +215,22 @@ class ReconModule(BaseModule):
             "/Mod_Rewrite_Shop/",
             "/AJAX/index.php",
             "/signup.php",
+            # Enterprise / Frameworks
+            "/console/login/LoginForm.jsp", # WebLogic
+            "/manager/html",                # Tomcat
+            "/actuator/env",                # Spring Boot
+            "/swagger-ui.html",             # Swagger API
             # Auth / common
             "/login.php",
+            "/login.jsp",
+            "/login.html",
             "/login",
             "/register",
             "/contact.php",
             # Admin
             "/admin",
             "/admin.php",
+            "/admin.jsp",
             # API
             "/api/v1/search",
             "/api/search",
@@ -252,3 +265,64 @@ class ReconModule(BaseModule):
             return self.target in parsed.netloc
         except Exception:
             return False
+
+    def _is_ip(self, host):
+        try:
+            ipaddress.ip_address(host)
+            return True
+        except ValueError:
+            return False
+
+    def _enumerate_subdomains(self):
+        """Query crt.sh for subdomains."""
+        domain = self.target.split(':')[0]
+        if self._is_ip(domain):
+            return
+
+        self.ui.info(f"Querying crt.sh for subdomains of {domain} ...")
+        url = f"https://crt.sh/?q=%25.{domain}&output=json"
+        try:
+            # crt.sh can be slow/unreliable, so we use a strict timeout
+            r = self.session.get(url, timeout=15)
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                    found = set()
+                    for entry in data:
+                        name = entry.get('name_value', '').lower()
+                        if name and '*' not in name:
+                            for sub in name.split('\n'):
+                                if sub.endswith(domain):
+                                    found.add(sub.strip())
+                    if found:
+                        self.ui.ok(f"crt.sh found {len(found)} subdomains")
+                        existing = self.ctx.setdefault("subdomains", [])
+                        self.ctx["subdomains"] = list(set(existing + list(found)))
+                except Exception:
+                    pass
+        except Exception:
+            self.ui.warn("crt.sh query timed out or failed.")
+
+    def _find_osint_urls(self):
+        """Query AlienVault OTX for known URLs."""
+        domain = self.target.split(':')[0]
+        if self._is_ip(domain):
+            return
+
+        self.ui.info(f"Querying AlienVault OTX for historical URLs on {domain} ...")
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=150"
+        try:
+            r = self.session.get(url, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                url_list = data.get("url_list", [])
+                added = 0
+                for item in url_list:
+                    u = item.get("url")
+                    if u and u not in self.endpoints:
+                        self.endpoints.add(u)
+                        added += 1
+                if added > 0:
+                    self.ui.ok(f"AlienVault OTX found {added} historical URLs")
+        except Exception:
+            self.ui.warn("AlienVault OTX query timed out or failed.")

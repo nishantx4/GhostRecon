@@ -50,6 +50,19 @@ class ReconModule(BaseModule):
         s.max_redirects = 5
         return s
 
+    def _resolve_base_url(self):
+        """Try HTTPS first, fall back to HTTP if it fails."""
+        for scheme in ("https", "http"):
+            url = f"{scheme}://{self.target}"
+            try:
+                r = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+                if r.status_code < 500:
+                    # Follow any redirect to get the real base
+                    return r.url.rstrip("/").split("?")[0]
+            except Exception:
+                continue
+        return f"http://{self.target}"
+
     def run(self):
         self.ui.section("Recon — Crawling & Endpoint Discovery")
         if not requests:
@@ -62,11 +75,18 @@ class ReconModule(BaseModule):
         except Exception:
             pass
 
-        # Start crawl from base URL
+        # Resolve real base URL (HTTP vs HTTPS auto-detect)
+        self.ui.info(f"Resolving base URL for {self.target} ...")
+        self.base_url = self._resolve_base_url()
+        self.ctx["base_url"] = self.base_url   # ← share with other modules
+        self.ui.ok(f"Base URL resolved: {self.base_url}")
+
+        # Start crawl
         self.ui.info(f"Crawling {self.base_url} ...")
         self._crawl(self.base_url, depth=2)
 
-        # Also probe common paths
+        # Always seed endpoints with known-injectable probe paths
+        # so XSS/SQLi have targets even if the crawl fails
         self._probe_common_paths()
 
         # Update context
@@ -90,18 +110,18 @@ class ReconModule(BaseModule):
         if depth == 0 or url in self.visited:
             return
         self.visited.add(url)
+        # Add to endpoints immediately — even if the request fails we
+        # know this URL exists (we resolved it in _resolve_base_url).
+        self.endpoints.add(url)
 
         try:
-            resp = self.session.get(url, timeout=self.timeout)
+            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
             time.sleep(self.delay)
         except Exception:
             return
 
-        self.endpoints.add(url)
-
-        # Extract links
+        # Extract links and forms
         links = self._extract_links(resp.text, url)
-        # Extract forms
         self._extract_forms(resp.text, url)
 
         # Recurse into same-domain links
@@ -157,25 +177,72 @@ class ReconModule(BaseModule):
                 self.endpoints.add(action)
 
     def _probe_common_paths(self):
+        """
+        Probe well-known injectable paths.
+        ALL paths are added to ctx['probe_targets'] so XSS/SQLi can
+        test them regardless of whether they respond.
+        Paths that actually return a live response are also added to
+        self.endpoints.
+        """
         paths = [
-            "/search", "/search.php", "/query", "/?s=", "/?q=",
-            "/index.php?id=1", "/page.php?id=1", "/item.php?id=1",
-            "/user.php?id=1", "/product.php?id=1", "/news.php?id=1",
-            "/login", "/login.php", "/signin", "/register",
-            "/contact", "/contact.php", "/comment",
-            "/api/v1/search", "/api/search", "/api/users",
+            # Generic search / input params
+            "/search.php?test=query",
+            "/search?q=test",
+            "/?s=test",
+            "/?q=test",
+            # ID-based pages (prime SQLi targets)
+            "/index.php?id=1",
+            "/page.php?id=1",
+            "/item.php?id=1",
+            "/view.php?id=1",
+            "/show.php?id=1",
+            "/detail.php?id=1",
+            "/news.php?id=1",
+            "/product.php?id=1",
+            # vulnweb / acunetix style (deliberately vulnerable)
+            "/listproducts.php?cat=1",
+            "/artists.php?artist=1",
+            "/userinfo.php?uid=1",
+            "/guestbook.php",
+            "/comment.php",
+            "/showimage.php?file=1",
+            "/hpp/params.php?p=1&pp=2",
+            "/Mod_Rewrite_Shop/",
+            "/AJAX/index.php",
+            "/signup.php",
+            # Auth / common
+            "/login.php",
+            "/login",
+            "/register",
+            "/contact.php",
+            # Admin
+            "/admin",
+            "/admin.php",
+            # API
+            "/api/v1/search",
+            "/api/search",
+            "/api/users",
         ]
-        self.ui.info(f"Probing {len(paths)} common paths...")
+        probe_targets = []
         for path in paths:
             url = urllib.parse.urljoin(self.base_url, path)
+            probe_targets.append(url)
+            # Add immediately so scanners always have these targets
+            self.endpoints.add(url)
+
+        # Store probe targets in context for XSS/SQLi to use directly
+        self.ctx["probe_targets"] = probe_targets
+
+        self.ui.info(f"Probing {len(paths)} common paths for live responses...")
+        probe_timeout = min(self.timeout, 8)  # shorter timeout for probing
+        for url in probe_targets:
             try:
-                resp = self.session.get(url, timeout=self.timeout)
+                resp = self.session.get(url, timeout=probe_timeout, allow_redirects=True)
                 if resp.status_code not in (404, 410):
-                    self.endpoints.add(url)
                     self._extract_forms(resp.text, url)
                     if self.verbose:
-                        self.ui.info(f"  Found: {url} [{resp.status_code}]")
-                time.sleep(self.delay)
+                        self.ui.info(f"  [{resp.status_code}] {url}")
+                time.sleep(self.delay * 0.5)  # half delay for probing
             except Exception:
                 pass
 

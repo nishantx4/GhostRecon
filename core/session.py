@@ -77,7 +77,7 @@ class ScanSession:
         self.ui.section(f"Starting GhostRecon against: {self.target}")
         self.ui.info(f"Modules: {', '.join(self.modules)}")
         self.ui.info(f"Scope: {self.scope or 'Not specified — treat all discovered assets as in-scope'}")
-        self.ui.info(f"AI Analysis: {'Enabled (Claude)' if self.api_key else 'Local engine (no API key)'}")
+        self.ui.info(f"AI Analysis: {'Enabled — NVIDIA NIM (qwen3.5-122b)' if self.api_key else 'Local engine (no API key set)'}")
         self.ui.info(f"Output dir: {self.output_dir}")
         self.ui.blank()
 

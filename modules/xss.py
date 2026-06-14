@@ -103,7 +103,9 @@ class XSSModule(BaseModule):
         self.verbose    = verbose
         self.ai         = ai
         self.output_dir = output_dir
-        self.base_url   = f"https://{target}" if not target.startswith("http") else target
+        self.base_url   = self.ctx.get("base_url") or (
+            f"https://{target}" if not target.startswith("http") else target
+        )
         self.session    = self._make_session()
         self.found      = []
 
@@ -165,7 +167,9 @@ class XSSModule(BaseModule):
         # Parse GET params from known URLs
         for ep in raw_eps:
             try:
-                parsed = urllib.parse.urlparse(ep if ep.startswith("http") else f"https://{self.target}{ep}")
+                if not ep.startswith("http"):
+                    ep = self.base_url.rstrip("/") + "/" + ep.lstrip("/")
+                parsed = urllib.parse.urlparse(ep)
                 qs = urllib.parse.parse_qs(parsed.query)
                 if qs:
                     key = parsed.scheme + "://" + parsed.netloc + parsed.path

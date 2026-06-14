@@ -17,8 +17,8 @@ import json
 
 # ── Model config ──────────────────────────────────────────────────────────────
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-# Free-tier model — fast, capable, great for security analysis
-NVIDIA_MODEL    = "meta/llama-3.1-70b-instruct"
+# Free-tier model — Qwen3 80B, fast and capable for security analysis
+NVIDIA_MODEL    = "qwen/qwen3-next-80b-a3b-instruct"
 
 
 class AIEngine:
@@ -56,7 +56,9 @@ class AIEngine:
                     {"role": "user",   "content": user},
                 ],
                 max_tokens=max_tokens,
-                temperature=0.2,
+                temperature=0.6,
+                top_p=0.7,
+                stream=False,
             )
             return resp.choices[0].message.content.strip()
         except Exception as e:
@@ -358,6 +360,9 @@ class AIEngine:
                 model=NVIDIA_MODEL,
                 messages=[{"role": "user", "content": "Say OK"}],
                 max_tokens=5,
+                temperature=0.6,
+                top_p=0.7,
+                stream=False,
             )
             answer = resp.choices[0].message.content.strip()
             return bool(answer)

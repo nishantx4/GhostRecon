@@ -21,6 +21,14 @@ import argparse
 import sys
 import os
 
+# Fix Windows terminal encoding so emoji/Unicode don't crash on cp1252
+if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
 # Make sure modules are importable from any CWD
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 

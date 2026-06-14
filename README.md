@@ -14,11 +14,11 @@
 **AI-Powered Bug Bounty Hunter CLI**
 
 [![Python](https://img.shields.io/badge/Python-3.8+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
-[![Claude AI](https://img.shields.io/badge/Claude-AI%20Powered-D97757?style=for-the-badge&logo=anthropic&logoColor=white)](https://anthropic.com)
+[![NVIDIA NIM](https://img.shields.io/badge/NVIDIA-NIM%20AI-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://build.nvidia.com/)
 [![License](https://img.shields.io/badge/License-GPL%20v3-22c55e?style=for-the-badge)](LICENSE)
 [![Made by](https://img.shields.io/badge/Made%20by-Nishant-a855f7?style=for-the-badge)](https://github.com/nishantx4)
 
-*A personal bug bounty hunting companion — built to make recon smarter, faster, and more fun.*
+*Your personal bug bounty hunting companion — built to make recon smarter, faster, and more fun.*
 
 </div>
 
@@ -26,7 +26,9 @@
 
 ## 🤔 What is GhostRecon?
 
-GhostRecon is a modular, AI-assisted recon and vulnerability scanning CLI tool designed for bug bounty hunters. Point it at a target domain and it crawls endpoints, detects common vulnerabilities (XSS, SQLi, IDOR, SSRF, CORS misconfigs, and more), then optionally sends findings to **Claude AI** for vulnerability chain analysis and estimated bounty values.
+GhostRecon is a modular, AI-assisted recon and vulnerability scanning CLI tool built for bug bounty hunters. Point it at a target domain and it crawls endpoints, detects common vulnerabilities (XSS, SQLi, IDOR, SSRF, CORS misconfigs, and more), then uses **NVIDIA NIM AI (free tier)** not just to generate reports — but to actively *help during the hunt itself*.
+
+The AI ranks your endpoints, deep-dives JavaScript files, validates IDOR findings, assesses header risks, and generates targeted payloads — all while you scan.
 
 Think of it as your personal ghost that haunts a target and reports back everything it finds. 👻
 
@@ -38,7 +40,9 @@ Think of it as your personal ghost that haunts a target and reports back everyth
 |---|---|
 | 🔍 **Smart Recon** | Crawls endpoints, extracts forms, probes common paths |
 | 🛡️ **14 Scan Modules** | XSS, SQLi, IDOR, SSRF, CORS, GraphQL, HTTP Smuggling, Secrets & more |
-| 🤖 **Claude AI Integration** | Analyzes vulnerability chains, estimates bounty values, generates PoC outlines |
+| 🤖 **NVIDIA NIM AI** | Free-tier AI that actively helps during scanning — not just reports |
+| 🎯 **Active AI Hunting** | Endpoint prioritization, JS deep-analysis, IDOR validation, payload generation |
+| 🔑 **Persistent API Key** | Set once with `--set-api`, automatically used on every scan |
 | 📊 **Rich Terminal UI** | Color-coded severity output, spinners, progress bars, tables |
 | 📄 **Auto Reports** | Generates Markdown bug bounty reports + JSON data + shell command runbooks |
 | 🎮 **Interactive Mode** | Menu-driven interface — no flags needed |
@@ -55,13 +59,37 @@ git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
 # 2. Install dependencies
-pip install requests anthropic
+pip install requests openai
 
-# 3. Run it!
+# 3. (Optional) Set your free NVIDIA NIM API key
+python ghostrecon.py --set-api nvapi-xxxx
+
+# 4. Run it!
 python ghostrecon.py --help
 ```
 
-> **Note:** `anthropic` is only needed if you want Claude AI analysis. The tool runs fully offline without it.
+> **Note:** `openai` is only needed for AI-assisted hunting. The tool runs fully offline without it.  
+> Get a **free** NVIDIA NIM API key at 👉 [build.nvidia.com](https://build.nvidia.com/)
+
+---
+
+## 🔑 API Key Management
+
+GhostRecon uses **NVIDIA NIM** (free tier) — no paid subscriptions needed.
+
+```bash
+# Save your key once — it's stored at ~/.ghostrecon/config.json
+# The key is auto-tested before saving to make sure it works
+python ghostrecon.py --set-api nvapi-xxxx
+
+# Test whether your key is working at any time
+python ghostrecon.py --api-test
+
+# Remove the saved key
+python ghostrecon.py --remove-api
+```
+
+Once saved, the key is automatically loaded on every scan. No need to pass `--api-key` every time.
 
 ---
 
@@ -75,23 +103,25 @@ python ghostrecon.py -t example.com
 # Full scan — all 14 modules
 python ghostrecon.py -t example.com --full
 
-# With Claude AI analysis
-python ghostrecon.py -t example.com --api-key sk-ant-...
-
 # Interactive mode (guided menu)
 python ghostrecon.py --interactive
 ```
 
 ### Pick Your Modules
 ```bash
-# Only run specific modules
 python ghostrecon.py -t example.com --modules recon,xss,sqli,idor
 ```
 
 ### All Options
 ```
+NVIDIA AI Key Management:
+  --set-api KEY       Save your NVIDIA NIM API key (auto-tests before saving)
+  --remove-api        Remove the saved API key
+  --api-test          Test whether the saved key is working
+
+Scan Options:
   -t, --target        Target domain (e.g. example.com)
-  --api-key           Anthropic Claude API key (enables AI analysis)
+  --api-key KEY       Use a key for this session only (not saved)
   --full              Run all 14 modules
   --modules           Comma-separated list of modules to run
   --scope             Define in-scope assets
@@ -129,16 +159,26 @@ python ghostrecon.py -t example.com --modules recon,xss,sqli,idor
 
 ---
 
-## 🤖 AI-Powered Chain Analysis
+## 🤖 AI-Powered Hunting (NVIDIA NIM — Free)
 
-When you provide an Anthropic API key, GhostRecon sends all findings to **Claude** after the scan completes. Claude will:
+Unlike traditional scanners, GhostRecon's AI doesn't just run at the end to generate a report — it actively assists **during** the scan at multiple stages:
 
-- 🔗 Identify **vulnerability chains** (e.g. SSRF → Credential Exposure → Cloud Takeover)
-- 💰 Estimate **bounty ranges** per finding
-- 🗺️ Map out the **single highest-impact attack path**
-- 📋 Generate **PoC outlines** for the top 3 findings
+### During Recon
+- **Endpoint Prioritization** — AI ranks all discovered endpoints by bug bounty value (API routes, user/admin paths, ID parameters, payment flows get promoted to the top)
 
-No API key? No problem — the built-in local engine still identifies common chains and priorities.
+### During Headers Analysis
+- **Risk Chain Assessment** — AI looks at the *combination* of missing headers and explains what real-world attack chains they enable (not just "this header is missing")
+
+### During JavaScript Analysis
+- **Deep JS Inspection** — AI reads each JS file and hunts for hidden API routes, client-side auth bypass logic, dangerous function calls (`eval`, `innerHTML`), and obfuscated secrets that regex patterns miss
+
+### During IDOR Testing
+- **Smart Response Validation** — AI reads each 200-OK response and determines whether it *actually* leaks private user data, dramatically reducing false positives
+
+### After All Modules Complete
+- **Vulnerability Chain Analysis** — AI identifies chains like `SSRF → Credential Exposure → Cloud Takeover`, estimates bounty values per finding, and generates PoC outlines for the top 3 vulnerabilities
+
+> **No API key?** No problem. A built-in local rule-based engine handles chain analysis and prioritization offline.
 
 ---
 
@@ -148,9 +188,9 @@ Every scan generates three files in `./ghostrecon_output/`:
 
 ```
 ghostrecon_output/
-├── ghostrecon_example.com_20260609_120000.json      ← Raw findings data
-├── ghostrecon_example.com_20260609_120000.md         ← Full Markdown report
-└── ghostrecon_example.com_20260609_120000_commands.sh ← Shell command runbook
+├── ghostrecon_example.com_20260614_170000.json        ← Raw findings data
+├── ghostrecon_example.com_20260614_170000.md           ← Full Markdown report
+└── ghostrecon_example.com_20260614_170000_commands.sh  ← Shell command runbook
 ```
 
 The Markdown report is ready to submit directly to **HackerOne**, **Bugcrowd**, or any bug bounty platform.
@@ -171,36 +211,37 @@ The Markdown report is ready to submit directly to **HackerOne**, **Bugcrowd**, 
 
 ```
 ghostrecon/
-├── ghostrecon.py          ← Entry point & CLI argument parser
+├── ghostrecon.py           ← Entry point, CLI parser, API key management
 ├── core/
-│   ├── banner.py          ← ASCII art banner & startup display
-│   ├── session.py         ← Scan orchestrator (runs all modules)
-│   ├── ai_engine.py       ← Claude API + local fallback engine
-│   ├── interactive.py     ← Interactive menu mode
-│   ├── findings.py        ← Findings database
-│   └── ui.py              ← Terminal colors, spinners, tables
+│   ├── config.py           ← Persistent config (~/.ghostrecon/config.json)
+│   ├── ai_engine.py        ← NVIDIA NIM AI engine + local fallback
+│   ├── banner.py           ← ASCII art banner & startup display
+│   ├── session.py          ← Scan orchestrator (runs all modules in order)
+│   ├── interactive.py      ← Interactive menu mode
+│   ├── findings.py         ← Findings database (deduplication, severity)
+│   └── ui.py               ← Terminal colors, spinners, progress bars, tables
 └── modules/
-    ├── recon.py           ← Crawler & endpoint discovery
-    ├── headers.py         ← Security headers checker
-    ├── js_analysis.py     ← JavaScript secrets scanner
-    ├── xss.py             ← XSS detection engine
-    ├── sqli.py            ← SQL Injection tester
-    ├── idor.py            ← IDOR detector
-    ├── cors.py            ← CORS misconfiguration checker
-    ├── ssrf.py            ← SSRF prober
-    ├── secrets.py         ← Secrets & sensitive file hunter
-    ├── nuclei_sim.py      ← Nuclei-style template checks
-    ├── graphql.py         ← GraphQL tester
-    ├── smuggling.py       ← HTTP Smuggling detector
-    ├── params.py          ← Parameter discovery
-    └── reporter.py        ← Report generator
+    ├── recon.py             ← Crawler & endpoint discovery  [AI: prioritization]
+    ├── headers.py           ← Security headers checker      [AI: risk chains]
+    ├── js_analysis.py       ← JavaScript secrets scanner    [AI: deep analysis]
+    ├── idor.py              ← IDOR detector                 [AI: response validation]
+    ├── xss.py               ← XSS detection engine
+    ├── sqli.py              ← SQL Injection tester
+    ├── cors.py              ← CORS misconfiguration checker
+    ├── ssrf.py              ← SSRF prober
+    ├── secrets.py           ← Secrets & sensitive file hunter
+    ├── nuclei_sim.py        ← Nuclei-style template checks
+    ├── graphql.py           ← GraphQL tester
+    ├── smuggling.py         ← HTTP Smuggling detector
+    ├── params.py            ← Parameter discovery
+    └── reporter.py          ← Report generator
 ```
 
 ---
 
 ## 🤝 Contributing
 
-Got a module idea or a better payload list? PRs are welcome!
+Got a module idea, a better payload list, or want to add AI to more modules? PRs are welcome!
 
 1. Fork the repo
 2. Create a feature branch (`git checkout -b feature/new-module`)
@@ -211,7 +252,9 @@ Got a module idea or a better payload list? PRs are welcome!
 
 <div align="center">
 
-Made by **Nishant**
+Made with 👻 by **[Nishant](https://github.com/nishantx4)**
+
+Powered by **[NVIDIA NIM](https://build.nvidia.com/)** — free AI inference for everyone
 
 *Happy hunting — and always hack ethically!*
 

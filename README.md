@@ -59,7 +59,7 @@ git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
 # 2. Install dependencies
-pip install requests openai
+pip install requests
 
 # 3. (Optional) Set your free NVIDIA NIM API key
 python ghostrecon.py --set-api nvapi-xxxx
@@ -68,7 +68,7 @@ python ghostrecon.py --set-api nvapi-xxxx
 python ghostrecon.py --help
 ```
 
-> **Note:** `openai` is only needed for AI-assisted hunting. The tool runs fully offline without it.  
+> **Note:** Only `requests` is needed — no paid API, no extra SDK.  
 > Get a **free** NVIDIA NIM API key at 👉 [build.nvidia.com](https://build.nvidia.com/)
 
 ---

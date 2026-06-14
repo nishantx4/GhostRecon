@@ -54,26 +54,47 @@ class IDORModule(BaseModule):
             try:
                 resp = s.get(url, timeout=self.timeout)
                 if resp.status_code == 200 and len(resp.text) > 50:
-                    # Basic check: does it return user data?
+                    # ── AI-enhanced check: let AI decide if response leaks private data
+                    ai_verdict = None
+                    if self.ai and self.ai.enabled:
+                        ai_verdict = self.ai.analyze_idor_response(
+                            url, resp.text, url.split('/')[-1]
+                        )
+
+                    # Fallback: keyword-based check
                     data_indicators = ["email", "username", "user_id", "account",
                                        "password", "phone", "address", "token"]
                     resp_lower = resp.text.lower()
-                    if any(ind in resp_lower for ind in data_indicators):
+                    keyword_hit = any(ind in resp_lower for ind in data_indicators)
+
+                    is_idor = False
+                    confidence = "medium"
+                    reason = "Response contains user data keywords"
+
+                    if ai_verdict:
+                        is_idor    = ai_verdict.get("is_idor", False)
+                        confidence = ai_verdict.get("confidence", "medium")
+                        reason     = ai_verdict.get("reason", reason)
+                    elif keyword_hit:
+                        is_idor = True
+
+                    if is_idor:
                         self.db.add(
-                            title=f"Potential IDOR — Object Access Without Auth Check",
+                            title="Potential IDOR — Object Access Without Auth Check",
                             severity="high", url=url, module=self.NAME,
                             description=(
-                                f"Endpoint {url} returns user data (200 OK) when accessed. "
-                                "Test with two accounts: if Account B can access Account A's data "
-                                "by changing the ID, this is a confirmed IDOR."
+                                f"Endpoint {url} returned 200 OK with likely user data. "
+                                f"AI assessment: {reason}. "
+                                "Verify with two accounts: if Account B can read Account A's "
+                                "data by changing the ID, this is confirmed IDOR."
                             ),
                             remediation=(
-                                "Implement server-side authorization checks. Verify requesting user "
-                                "owns the requested object. Use non-sequential UUIDs."
+                                "Implement server-side authorization. Verify requesting user "
+                                "owns the object. Use non-sequential UUIDs."
                             ),
-                            cvss="8.1", confidence="medium",
+                            cvss="8.1", confidence=confidence,
                         )
-                        self.ui.find("high", "Potential IDOR — manual verification required", url)
+                        self.ui.find("high", f"Potential IDOR — {reason}", url)
                         found += 1
                 time.sleep(self.delay)
             except Exception:

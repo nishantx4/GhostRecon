@@ -75,6 +75,15 @@ class ReconModule(BaseModule):
         self.ctx["forms"]     = self.forms
         self.ctx.setdefault("subdomains", [self.target])
 
+        # ── AI: prioritize endpoints for deeper testing ───────────────
+        if self.ai and self.ai.enabled and ep_list:
+            ep_list = self.ai.prioritize_endpoints(ep_list)
+            self.ctx["ai_priority_endpoints"] = ep_list[:20]
+            self.ui.subsection("AI Top-Priority Endpoints")
+            for ep in ep_list[:10]:
+                self.ui.bullet(ep)
+            self.ui.blank()
+
         self.ui.ok(f"Recon complete — {len(ep_list)} endpoints, {len(self.forms)} forms discovered")
 
     def _crawl(self, url, depth=2):

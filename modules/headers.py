@@ -97,6 +97,24 @@ class HeadersModule(BaseModule):
                     cvss="5.4", confidence="high",
                 )
 
+        # ── AI: assess combined header risk ──────────────────────────────
+        if self.ai and self.ai.enabled:
+            missing_names = [
+                h for h in self.REQUIRED_HEADERS
+                if h.lower() not in headers
+            ]
+            if missing_names:
+                ai_note = self.ai.analyze_headers(
+                    self.base_url,
+                    dict(resp.headers),
+                    missing_names,
+                )
+                if ai_note:
+                    self.ui.subsection("AI Header Risk Assessment")
+                    for line in ai_note.split("\n"):
+                        self.ui.raw(f"    {line}")
+                    self.ui.blank()
+
         self.ui.ok("Headers analysis complete")
 
 

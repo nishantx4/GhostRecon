@@ -11,7 +11,9 @@ bug bounty hunting smarter, faster, and a little more fun.
 
 Usage:
   python ghostrecon.py -t example.com [options]
-  python ghostrecon.py -t example.com --api-key sk-ant-... --full
+  python ghostrecon.py --set-api  nvapi-xxxx      (save your NVIDIA key)
+  python ghostrecon.py --api-test                  (verify the key works)
+  python ghostrecon.py --remove-api                (delete saved key)
   python ghostrecon.py --interactive
 """
 
@@ -25,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from core.banner import print_banner
 from core.session import ScanSession
 from core.ui import UI
+import core.config as config
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -32,60 +36,135 @@ def parse_args():
         description='GhostRecon — AI Bug Bounty Hunter by Nishant',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+API Key Management:
+  python ghostrecon.py --set-api nvapi-xxxx    Save your NVIDIA NIM API key
+  python ghostrecon.py --api-test              Test if saved key is working
+  python ghostrecon.py --remove-api            Remove the saved key
+
+Scan Examples:
   python ghostrecon.py -t example.com
-  python ghostrecon.py -t example.com --api-key sk-ant-... --full
+  python ghostrecon.py -t example.com --full
   python ghostrecon.py -t example.com --modules recon,js,idor,xss
   python ghostrecon.py --interactive
+
+Get a free NVIDIA NIM API key at: https://build.nvidia.com/
         """
     )
-    parser.add_argument('-t', '--target',      help='Target domain (e.g. example.com)')
-    parser.add_argument('--api-key',           help='Anthropic Claude API key (enables AI analysis)')
-    parser.add_argument('--full',              action='store_true', help='Run all modules')
-    parser.add_argument('--modules',           help='Comma-separated modules')
-    parser.add_argument('--scope',             help='Scope definition')
-    parser.add_argument('--output',            help='Output report file')
-    parser.add_argument('--output-dir',        default='./ghostrecon_output', help='Output directory')
-    parser.add_argument('--threads',           type=int, default=10, help='Threads')
-    parser.add_argument('--timeout',           type=int, default=10, help='Timeout')
-    parser.add_argument('--delay',             type=float, default=0.5, help='Delay')
-    parser.add_argument('--no-color',          action='store_true', help='Disable color')
-    parser.add_argument('--verbose', '-v',     action='store_true', help='Verbose')
-    parser.add_argument('--interactive', '-i', action='store_true', help='Interactive menu mode')
-    parser.add_argument('--version',           action='version', version='GhostRecon v2.0 by Nishant')
+
+    # ── API key management (no target needed) ──
+    api_group = parser.add_argument_group('NVIDIA AI Key Management')
+    api_group.add_argument('--set-api',    metavar='KEY',
+                           help='Save your NVIDIA NIM API key persistently (~/.ghostrecon/config.json)')
+    api_group.add_argument('--remove-api', action='store_true',
+                           help='Remove the saved NVIDIA API key')
+    api_group.add_argument('--api-test',   action='store_true',
+                           help='Test whether the saved (or provided) API key is working')
+
+    # ── Scan target ──
+    scan_group = parser.add_argument_group('Scan Options')
+    scan_group.add_argument('-t', '--target',      help='Target domain (e.g. example.com)')
+    scan_group.add_argument('--api-key',           help='NVIDIA NIM API key for this session only (not saved)')
+    scan_group.add_argument('--full',              action='store_true', help='Run all modules')
+    scan_group.add_argument('--modules',           help='Comma-separated modules to run')
+    scan_group.add_argument('--scope',             help='Scope definition')
+    scan_group.add_argument('--output',            help='Output report file')
+    scan_group.add_argument('--output-dir',        default='./ghostrecon_output', help='Output directory')
+    scan_group.add_argument('--threads',           type=int, default=10, help='Threads (default: 10)')
+    scan_group.add_argument('--timeout',           type=int, default=10, help='Request timeout (default: 10s)')
+    scan_group.add_argument('--delay',             type=float, default=0.5, help='Delay between requests (default: 0.5s)')
+    scan_group.add_argument('--no-color',          action='store_true', help='Disable colored output')
+    scan_group.add_argument('--verbose', '-v',     action='store_true', help='Verbose output')
+    scan_group.add_argument('--interactive', '-i', action='store_true', help='Interactive menu mode')
+    scan_group.add_argument('--version',           action='version', version='GhostRecon v2.0 by Nishant')
+
     return parser.parse_args()
+
+
+def handle_api_commands(args, ui) -> bool:
+    """
+    Handle --set-api, --remove-api, --api-test.
+    Returns True if a management command was handled (caller should exit).
+    """
+    handled = False
+
+    if args.set_api:
+        handled = True
+        key = args.set_api.strip()
+        ui.info("Testing key before saving...")
+        from core.ai_engine import AIEngine
+        if AIEngine.test_key(key, ui):
+            config.set_api_key(key)
+            ui.ok(f"✓ API key saved to ~/.ghostrecon/config.json")
+            ui.info("AI-assisted hunting is now active on all future scans.")
+        else:
+            ui.error("Key test failed — key NOT saved. Double-check your NVIDIA NIM key.")
+            ui.info("Get a free key at: https://build.nvidia.com/")
+
+    if args.remove_api:
+        handled = True
+        config.remove_api_key()
+        ui.ok("API key removed from ~/.ghostrecon/config.json")
+
+    if args.api_test:
+        handled = True
+        # Prefer CLI-provided key, fall back to saved one
+        key = (args.api_key or "").strip() or config.get_api_key()
+        if not key:
+            ui.error("No API key found. Run: python ghostrecon.py --set-api nvapi-xxxx")
+        else:
+            ui.info(f"Testing NVIDIA NIM API key: {key[:12]}...{key[-4:]}")
+            from core.ai_engine import AIEngine
+            if AIEngine.test_key(key, ui):
+                ui.ok("✓ API key is valid and working!")
+                ui.info(f"Model: meta/llama-3.1-70b-instruct  |  Endpoint: https://integrate.api.nvidia.com/v1")
+            else:
+                ui.error("✗ API key test failed. Check the key and your internet connection.")
+
+    return handled
 
 
 def main():
     args = parse_args()
-    ui = UI(no_color=args.no_color)
+    ui   = UI(no_color=args.no_color)
     print_banner(ui)
 
-    # 1. Logic to determine Target and Modules
+    # Handle API management commands first (no scan needed)
+    if handle_api_commands(args, ui):
+        return
+
+    # Resolve API key: CLI flag overrides saved key
+    api_key = (args.api_key or "").strip() or config.get_api_key()
+    if api_key:
+        ui.ok("NVIDIA AI engine active — AI-assisted hunting enabled 🤖")
+    else:
+        ui.warn("No API key set — running in local-only mode.")
+        ui.info("Tip: python ghostrecon.py --set-api nvapi-xxxx  (free at build.nvidia.com)")
+    ui.blank()
+
+    # Determine target and modules
     if args.interactive or not args.target:
         from core.interactive import InteractiveMenu
         menu = InteractiveMenu(ui)
-        # Capture the data from the menu
         target, modules = menu.run()
     else:
-        # Standard CLI mode
         target = args.target
         if args.full:
-            modules = ['recon', 'headers', 'js', 'params', 'nuclei', 'xss', 'idor', 'sqli', 'graphql', 'smuggling', 'cors', 'ssrf', 'secrets', 'report']
+            modules = ['recon', 'headers', 'js', 'params', 'nuclei',
+                       'xss', 'idor', 'sqli', 'graphql', 'smuggling',
+                       'cors', 'ssrf', 'secrets', 'report']
         elif args.modules:
             modules = [m.strip() for m in args.modules.split(',')]
         else:
-            modules = ['recon', 'headers', 'js', 'params', 'nuclei', 'xss', 'idor', 'cors', 'ssrf', 'report']
+            modules = ['recon', 'headers', 'js', 'params', 'nuclei',
+                       'xss', 'idor', 'cors', 'ssrf', 'report']
 
-    # 2. Final Check
     if not target:
         ui.error("No target specified. Exiting.")
         return
 
-    # 3. Create and Run Session
     session = ScanSession(
         target=target,
-        api_key=args.api_key,
+        api_key=api_key,
         modules=modules,
         scope=args.scope,
         output_dir=args.output_dir,
@@ -103,6 +182,7 @@ def main():
         ui.error("\n\n[!] Scan interrupted by user. Saving partial results...")
         session.save_partial()
         sys.exit(0)
+
 
 if __name__ == '__main__':
     main()

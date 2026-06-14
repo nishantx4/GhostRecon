@@ -73,6 +73,15 @@ class JSModule(BaseModule):
                         continue
                     found_secrets.append((js_url, secret_type, val[:40]))
 
+            # ── AI deep analysis of this JS file ────────────────────
+            if self.ai and self.ai.enabled and len(content) > 200:
+                ai_note = self.ai.analyze_js_content(js_url, content)
+                if ai_note:
+                    self.ui.subsection(f"AI JS Insight: {js_url.split('/')[-1]}")
+                    for line in ai_note.split("\n"):
+                        self.ui.raw(f"    {line}")
+                    self.ui.blank()
+
         self.ctx["js_secrets"] = found_secrets
         if found_secrets:
             for url, stype, val in found_secrets:

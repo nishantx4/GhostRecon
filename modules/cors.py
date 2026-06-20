@@ -42,14 +42,29 @@ class CORSModule(BaseModule):
 
                 if acao == origin or acao == "*":
                     severity = "high" if (acac.lower() == "true" and acao != "*") else "medium"
+
+                    # Optional AI assist: explain real-world exploitability.
+                    ai_note = None
+                    if self.ai and self.ai.enabled:
+                        try:
+                            ai_note = self.ai.analyze_cors(self.base_url, origin, acao, acac)
+                            if ai_note:
+                                self.ui.ai(ai_note.split("\n")[0][:200])
+                        except Exception:
+                            pass
+
+                    description = (
+                        f"The server reflects the attacker-controlled origin '{origin}' in "
+                        f"Access-Control-Allow-Origin. With credentials: {acac}. "
+                        "This allows cross-origin requests to read authenticated responses."
+                    )
+                    if ai_note:
+                        description += f"\n\nAI assessment: {ai_note.strip()}"
+
                     self.db.add(
                         title=f"CORS Misconfiguration — Reflected Origin: {acao}",
                         severity=severity, url=self.base_url, module=self.NAME,
-                        description=(
-                            f"The server reflects the attacker-controlled origin '{origin}' in "
-                            f"Access-Control-Allow-Origin. With credentials: {acac}. "
-                            "This allows cross-origin requests to read authenticated responses."
-                        ),
+                        description=description,
                         remediation=(
                             "Whitelist only trusted origins. Never reflect the Origin header blindly. "
                             "Do not combine Access-Control-Allow-Credentials: true with wildcard origins."

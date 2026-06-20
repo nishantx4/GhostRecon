@@ -36,10 +36,26 @@ class GraphQLModule(BaseModule):
                 import json
                 resp = s.post(url, json={"query": "{__schema{types{name}}}"}, timeout=self.timeout)
                 if resp.status_code == 200 and "__schema" in resp.text:
+                    ai_note = None
+                    if self.ai and self.ai.enabled:
+                        try:
+                            ai_note = self.ai.analyze_graphql(url, resp.text)
+                            if ai_note:
+                                self.ui.ai(ai_note.split("\n")[0][:200])
+                        except Exception:
+                            pass
+
+                    description = (
+                        "GraphQL schema introspection is enabled in production, revealing "
+                        "full API structure, types, and mutations."
+                    )
+                    if ai_note:
+                        description += f"\n\nAI: most abusable surface:\n{ai_note.strip()}"
+
                     self.db.add(
                         title="GraphQL Introspection Enabled",
                         severity="high", url=url, module=self.NAME,
-                        description="GraphQL schema introspection is enabled in production, revealing full API structure, types, and mutations.",
+                        description=description,
                         remediation="Disable introspection in production. Use query depth limiting and query cost analysis.",
                         cvss="7.5", confidence="high",
                     )

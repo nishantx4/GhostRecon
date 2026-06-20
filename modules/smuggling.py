@@ -37,14 +37,27 @@ class SmugglingModule(BaseModule):
         has_proxy = any(p in h for p in proxy_indicators)
 
         if has_proxy:
+            ai_note = None
+            if self.ai and self.ai.enabled:
+                try:
+                    ai_note = self.ai.analyze_smuggling(self.base_url, resp.headers)
+                    if ai_note:
+                        self.ui.ai(ai_note.split("\n")[0][:200])
+                except Exception:
+                    pass
+
+            description = (
+                "A proxy/CDN layer is detected in front of the application. "
+                "This infrastructure is potentially vulnerable to HTTP request smuggling (CL.TE or TE.CL). "
+                "Manual testing with Burp Suite HTTP Request Smuggler extension is recommended."
+            )
+            if ai_note:
+                description += f"\n\nAI assessment: {ai_note.strip()}"
+
             self.db.add(
                 title="HTTP Request Smuggling — Proxy Infrastructure Detected",
                 severity="info", url=self.base_url, module=self.NAME,
-                description=(
-                    "A proxy/CDN layer is detected in front of the application. "
-                    "This infrastructure is potentially vulnerable to HTTP request smuggling (CL.TE or TE.CL). "
-                    "Manual testing with Burp Suite HTTP Request Smuggler extension is recommended."
-                ),
+                description=description,
                 remediation=(
                     "Test with Burp HTTP Request Smuggler. Ensure front-end and back-end servers "
                     "consistently parse Transfer-Encoding and Content-Length headers."

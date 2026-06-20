@@ -38,16 +38,17 @@ Think of it as your personal ghost that haunts a target and reports back everyth
 
 | Feature | Description |
 |---|---|
-| 🔍 **Smart Recon** | Crawls endpoints, extracts forms, probes common paths |
-| 🛡️ **14 Scan Modules** | XSS, SQLi, IDOR, SSRF, CORS, GraphQL, HTTP Smuggling, Secrets & more |
-| 🤖 **NVIDIA NIM AI** | Free-tier AI that actively helps during scanning — not just reports |
-| 🎯 **Active AI Hunting** | Endpoint prioritization, JS deep-analysis, IDOR validation, payload generation |
+| 🔍 **Smart Recon** | Crawls endpoints, extracts forms, mines JS for hidden API paths & params, probes common paths |
+| 🛡️ **16 Scan Modules** | XSS, SQLi, IDOR, SSTI, SSRF, Open Redirect, CORS, GraphQL, HTTP Smuggling, Secrets & more |
+| 🤖 **NVIDIA NIM AI** | Free-tier AI wired into *every* module — actively helps during the scan, not just reports |
+| 🎯 **Active AI Hunting** | Endpoint prioritization, JS deep-analysis, IDOR/SSRF/secret validation, payload generation |
+| 🔁 **Swappable Model** | Set any free NVIDIA NIM model with `--set-model` (default: `meta/llama-3.1-70b-instruct`) |
 | 🔑 **Persistent API Key** | Set once with `--set-api`, automatically used on every scan |
 | 📊 **Rich Terminal UI** | Color-coded severity output, spinners, progress bars, tables |
 | 📄 **Auto Reports** | Generates Markdown bug bounty reports + JSON data + shell command runbooks |
 | 🎮 **Interactive Mode** | Menu-driven interface — no flags needed |
-| ⚡ **Multi-threaded** | Configurable thread pool for faster scanning |
-| 🔌 **Local Fallback** | Full rule-based chain analysis even without an API key |
+| ⚡ **Multi-threaded** | Configurable thread pool with a global rate limiter that honours `--delay` |
+| 🔌 **Local Fallback** | Every module works fully without an API key — AI is purely additive |
 
 ---
 
@@ -59,7 +60,7 @@ git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
 # 2. Install dependencies
-pip install requests
+pip install -r requirements.txt
 
 # 3. (Optional) Set your free NVIDIA NIM API key
 python ghostrecon.py --set-api nvapi-xxxx
@@ -84,6 +85,10 @@ python ghostrecon.py --set-api nvapi-xxxx
 
 # Test whether your key is working at any time
 python ghostrecon.py --api-test
+
+# Choose which free NVIDIA NIM model to use (default: meta/llama-3.1-70b-instruct)
+python ghostrecon.py --set-model meta/llama-3.1-70b-instruct
+python ghostrecon.py --show-model
 
 # Remove the saved key
 python ghostrecon.py --remove-api
@@ -118,11 +123,13 @@ NVIDIA AI Key Management:
   --set-api KEY       Save your NVIDIA NIM API key (auto-tests before saving)
   --remove-api        Remove the saved API key
   --api-test          Test whether the saved key is working
+  --set-model MODEL   Set the NVIDIA NIM model (default: meta/llama-3.1-70b-instruct)
+  --show-model        Show the currently configured model
 
 Scan Options:
   -t, --target        Target domain (e.g. example.com)
   --api-key KEY       Use a key for this session only (not saved)
-  --full              Run all 14 modules
+  --full              Run all 16 modules
   --modules           Comma-separated list of modules to run
   --scope             Define in-scope assets
   --output            Custom output report filename
@@ -142,19 +149,21 @@ Scan Options:
 
 | Module | Flag | What it does |
 |---|---|---|
-| `recon` | default | Crawls the target, discovers endpoints & forms |
-| `headers` | default | Checks for missing security headers |
-| `js` | default | Analyzes JavaScript files for secrets & API keys |
+| `recon` | default | Crawls the target, discovers endpoints & forms, mines JS for hidden paths & params |
+| `headers` | default | Checks for missing security headers [AI: risk chains] |
+| `js` | default | Analyzes JavaScript files for secrets & API keys [AI: deep analysis] |
 | `params` | default | Identifies injectable URL parameters |
 | `nuclei` | default | Simulates common CVE/template checks |
-| `xss` | default | Tests for reflected & stored XSS |
-| `idor` | default | Detects Insecure Direct Object References |
-| `cors` | default | Checks CORS misconfiguration |
-| `ssrf` | default | Probes for Server-Side Request Forgery |
-| `sqli` | `--full` | Tests for SQL Injection (multiple techniques) |
-| `graphql` | `--full` | GraphQL introspection & mutation abuse |
-| `smuggling` | `--full` | HTTP Request Smuggling detection |
-| `secrets` | `--full` | Hunts for exposed secrets, `.env` files, backups |
+| `xss` | default | Tests for reflected XSS with context-aware payloads [AI: payloads] |
+| `idor` | default | Detects IDOR by comparing responses across object IDs [AI: validation] |
+| `cors` | default | Checks CORS misconfiguration [AI: exploitability] |
+| `ssrf` | default | Per-param SSRF with bypass payloads & cloud-metadata signatures [AI: payloads + validation] |
+| `redirect` | default | Detects open redirects in redirect-style parameters |
+| `sqli` | `--full` | Tests for SQL Injection (error/boolean/time/union) [AI: DB fingerprint] |
+| `ssti` | `--full` | Server-Side Template Injection via arithmetic markers (Jinja2/Twig/ERB/…) |
+| `graphql` | `--full` | GraphQL introspection & schema analysis [AI: abusable surface] |
+| `smuggling` | `--full` | HTTP Request Smuggling detection [AI: desync assessment] |
+| `secrets` | `--full` | Exposed `.env`/backups with entropy scoring [AI: secret validation] |
 | `report` | always | Generates the final Markdown + JSON report |
 
 ---
@@ -173,12 +182,18 @@ Unlike traditional scanners, GhostRecon's AI doesn't just run at the end to gene
 - **Deep JS Inspection** — AI reads each JS file and hunts for hidden API routes, client-side auth bypass logic, dangerous function calls (`eval`, `innerHTML`), and obfuscated secrets that regex patterns miss
 
 ### During IDOR Testing
-- **Smart Response Validation** — AI reads each 200-OK response and determines whether it *actually* leaks private user data, dramatically reducing false positives
+- **Two-Identity Comparison** — GhostRecon swaps the object ID at an endpoint, fetches two records, and reports only when they return distinct per-object data with no ownership check. AI gives a second opinion to cut false positives.
+
+### During SSRF Testing
+- **Bypass Payloads + Validation** — AI suggests target-specific filter-bypass payloads, and judges whether a response really proves the server made the internal/metadata request.
+
+### During Secrets Hunting
+- **Real-Secret Validation** — reachable files are scored by entropy and credential patterns; AI then decides real secret vs placeholder, downgrading (not dropping) likely examples.
 
 ### After All Modules Complete
 - **Vulnerability Chain Analysis** — AI identifies chains like `SSRF → Credential Exposure → Cloud Takeover`, estimates bounty values per finding, and generates PoC outlines for the top 3 vulnerabilities
 
-> **No API key?** No problem. A built-in local rule-based engine handles chain analysis and prioritization offline.
+> **No API key?** No problem. Every module runs fully without AI — the AI layer is purely additive — and a built-in local rule-based engine handles chain analysis offline.
 
 ---
 
@@ -224,15 +239,17 @@ ghostrecon/
     ├── recon.py             ← Crawler & endpoint discovery  [AI: prioritization]
     ├── headers.py           ← Security headers checker      [AI: risk chains]
     ├── js_analysis.py       ← JavaScript secrets scanner    [AI: deep analysis]
-    ├── idor.py              ← IDOR detector                 [AI: response validation]
-    ├── xss.py               ← XSS detection engine
-    ├── sqli.py              ← SQL Injection tester
-    ├── cors.py              ← CORS misconfiguration checker
-    ├── ssrf.py              ← SSRF prober
-    ├── secrets.py           ← Secrets & sensitive file hunter
+    ├── idor.py              ← IDOR detector (two-ID compare) [AI: validation]
+    ├── xss.py               ← XSS detection engine          [AI: payloads]
+    ├── sqli.py              ← SQL Injection tester           [AI: DB fingerprint]
+    ├── ssti.py              ← Server-Side Template Injection
+    ├── cors.py              ← CORS misconfiguration checker  [AI: exploitability]
+    ├── ssrf.py              ← SSRF prober (bypass payloads)  [AI: payloads + validation]
+    ├── open_redirect.py     ← Open redirect detector
+    ├── secrets.py           ← Secrets & sensitive file hunter [AI: secret validation]
     ├── nuclei_sim.py        ← Nuclei-style template checks
-    ├── graphql.py           ← GraphQL tester
-    ├── smuggling.py         ← HTTP Smuggling detector
+    ├── graphql.py           ← GraphQL tester                [AI: abusable surface]
+    ├── smuggling.py         ← HTTP Smuggling detector       [AI: desync assessment]
     ├── params.py            ← Parameter discovery
     └── reporter.py          ← Report generator
 ```

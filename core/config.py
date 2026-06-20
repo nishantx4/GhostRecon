@@ -44,6 +44,22 @@ def remove_api_key():
     _save(data)
 
 
+# Default to a known-good free NVIDIA NIM model.
+DEFAULT_MODEL = "meta/llama-3.1-70b-instruct"
+
+
+def get_model() -> str:
+    """Return the configured NVIDIA NIM model id, or the default."""
+    return _load().get("nvidia_model") or DEFAULT_MODEL
+
+
+def set_model(model: str):
+    """Persist the NVIDIA NIM model id to use."""
+    data = _load()
+    data["nvidia_model"] = model.strip()
+    _save(data)
+
+
 def get(key: str, default=None):
     return _load().get(key, default)
 

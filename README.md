@@ -38,16 +38,17 @@ Think of it as your personal ghost that haunts a target and reports back everyth
 
 | Feature | Description |
 |---|---|
-| 🔍 **Smart Recon** | Crawls endpoints, extracts forms, probes common paths |
-| 🛡️ **14 Scan Modules** | XSS, SQLi, IDOR, SSRF, CORS, GraphQL, HTTP Smuggling, Secrets & more |
-| 🤖 **NVIDIA NIM AI** | Free-tier AI that actively helps during scanning — not just reports |
-| 🎯 **Active AI Hunting** | Endpoint prioritization, JS deep-analysis, IDOR validation, payload generation |
+| 🔍 **Smart Recon** | Crawls endpoints, extracts forms, mines JS for hidden API paths & params, probes common paths |
+| 🛡️ **16 Scan Modules** | XSS, SQLi, IDOR, SSTI, SSRF, Open Redirect, CORS, GraphQL, HTTP Smuggling, Secrets & more |
+| 🤖 **NVIDIA NIM AI** | Free-tier AI wired into *every* module — actively helps during the scan, not just reports |
+| 🎯 **Active AI Hunting** | Endpoint prioritization, JS deep-analysis, IDOR/SSRF/secret validation, payload generation |
+| 🔁 **Swappable Model** | Set any free NVIDIA NIM model with `--set-model` (default: `meta/llama-3.1-70b-instruct`) |
 | 🔑 **Persistent API Key** | Set once with `--set-api`, automatically used on every scan |
 | 📊 **Rich Terminal UI** | Color-coded severity output, spinners, progress bars, tables |
 | 📄 **Auto Reports** | Generates Markdown bug bounty reports + JSON data + shell command runbooks |
 | 🎮 **Interactive Mode** | Menu-driven interface — no flags needed |
-| ⚡ **Multi-threaded** | Configurable thread pool for faster scanning |
-| 🔌 **Local Fallback** | Full rule-based chain analysis even without an API key |
+| ⚡ **Multi-threaded** | Configurable thread pool with a global rate limiter that honours `--delay` |
+| 🔌 **Local Fallback** | Every module works fully without an API key — AI is purely additive |
 
 ---
 
@@ -59,7 +60,7 @@ git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
 # 2. Install dependencies
-pip install requests
+pip install -r requirements.txt
 
 # 3. (Optional) Set your free NVIDIA NIM API key
 python ghostrecon.py --set-api nvapi-xxxx
@@ -84,6 +85,10 @@ python ghostrecon.py --set-api nvapi-xxxx
 
 # Test whether your key is working at any time
 python ghostrecon.py --api-test
+
+# Choose which free NVIDIA NIM model to use (default: meta/llama-3.1-70b-instruct)
+python ghostrecon.py --set-model meta/llama-3.1-70b-instruct
+python ghostrecon.py --show-model
 
 # Remove the saved key
 python ghostrecon.py --remove-api
@@ -142,19 +147,21 @@ Scan Options:
 
 | Module | Flag | What it does |
 |---|---|---|
-| `recon` | default | Crawls the target, discovers endpoints & forms |
-| `headers` | default | Checks for missing security headers |
-| `js` | default | Analyzes JavaScript files for secrets & API keys |
+| `recon` | default | Crawls the target, discovers endpoints & forms, mines JS for hidden paths & params |
+| `headers` | default | Checks for missing security headers [AI: risk chains] |
+| `js` | default | Analyzes JavaScript files for secrets & API keys [AI: deep analysis] |
 | `params` | default | Identifies injectable URL parameters |
 | `nuclei` | default | Simulates common CVE/template checks |
-| `xss` | default | Tests for reflected & stored XSS |
-| `idor` | default | Detects Insecure Direct Object References |
-| `cors` | default | Checks CORS misconfiguration |
-| `ssrf` | default | Probes for Server-Side Request Forgery |
-| `sqli` | `--full` | Tests for SQL Injection (multiple techniques) |
-| `graphql` | `--full` | GraphQL introspection & mutation abuse |
-| `smuggling` | `--full` | HTTP Request Smuggling detection |
-| `secrets` | `--full` | Hunts for exposed secrets, `.env` files, backups |
+| `xss` | default | Tests for reflected XSS with context-aware payloads [AI: payloads] |
+| `idor` | default | Detects IDOR by comparing responses across object IDs [AI: validation] |
+| `cors` | default | Checks CORS misconfiguration [AI: exploitability] |
+| `ssrf` | default | Per-param SSRF with bypass payloads & cloud-metadata signatures [AI: payloads + validation] |
+| `redirect` | default | Detects open redirects in redirect-style parameters |
+| `sqli` | `--full` | Tests for SQL Injection (error/boolean/time/union) [AI: DB fingerprint] |
+| `ssti` | `--full` | Server-Side Template Injection via arithmetic markers (Jinja2/Twig/ERB/…) |
+| `graphql` | `--full` | GraphQL introspection & schema analysis [AI: abusable surface] |
+| `smuggling` | `--full` | HTTP Request Smuggling detection [AI: desync assessment] |
+| `secrets` | `--full` | Exposed `.env`/backups with entropy scoring [AI: secret validation] |
 | `report` | always | Generates the final Markdown + JSON report |
 
 ---

@@ -16,11 +16,19 @@ Active hunting roles:
 """
 import json
 import requests as _requests
+import core.config as config
 
 
 # ── Model config ──────────────────────────────────────────────────────────────
 NVIDIA_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 NVIDIA_MODEL      = "qwen/qwen3.5-122b-a10b"
+
+# Models that support the qwen-style thinking mode kwarg.
+_THINKING_MODELS = ("qwen/", "deepseek-ai/")
+
+
+def _supports_thinking(model: str) -> bool:
+    return any(model.startswith(p) for p in _THINKING_MODELS)
 
 
 class AIEngine:
@@ -50,7 +58,7 @@ class AIEngine:
             "Content-Type": "application/json",
         }
         payload = {
-            "model": NVIDIA_MODEL,
+            "model": config.get_model(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user",   "content": user},
@@ -59,8 +67,9 @@ class AIEngine:
             "temperature": 0.60,
             "top_p": 0.95,
             "stream": True,
-            "chat_template_kwargs": {"enable_thinking": True},
         }
+        if _supports_thinking(config.get_model()):
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
 
         try:
             resp = _requests.post(
@@ -383,14 +392,15 @@ class AIEngine:
             "Content-Type": "application/json",
         }
         payload = {
-            "model": NVIDIA_MODEL,
+            "model": config.get_model(),
             "messages": [{"role": "user", "content": "Say the word OK and nothing else."}],
             "max_tokens": 10,
             "temperature": 0.60,
             "top_p": 0.95,
             "stream": True,
-            "chat_template_kwargs": {"enable_thinking": True},
         }
+        if _supports_thinking(config.get_model()):
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
         try:
             resp = _requests.post(
                 NVIDIA_INVOKE_URL,

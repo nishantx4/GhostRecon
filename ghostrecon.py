@@ -67,6 +67,10 @@ Get a free NVIDIA NIM API key at: https://build.nvidia.com/
                            help='Remove the saved NVIDIA API key')
     api_group.add_argument('--api-test',   action='store_true',
                            help='Test whether the saved (or provided) API key is working')
+    api_group.add_argument('--set-model',  metavar='MODEL',
+                           help='Set the NVIDIA NIM model id (default: meta/llama-3.1-70b-instruct)')
+    api_group.add_argument('--show-model', action='store_true',
+                           help='Show the currently configured NVIDIA NIM model')
 
     # ── Scan target ──
     scan_group = parser.add_argument_group('Scan Options')
@@ -83,7 +87,7 @@ Get a free NVIDIA NIM API key at: https://build.nvidia.com/
     scan_group.add_argument('--no-color',          action='store_true', help='Disable colored output')
     scan_group.add_argument('--verbose', '-v',     action='store_true', help='Verbose output')
     scan_group.add_argument('--interactive', '-i', action='store_true', help='Interactive menu mode')
-    scan_group.add_argument('--version',           action='version', version='GhostRecon v2.0 by Nishant')
+    scan_group.add_argument('--version',           action='version', version='GhostRecon v3.0 by Nishant')
 
     return parser.parse_args()
 
@@ -108,6 +112,15 @@ def handle_api_commands(args, ui) -> bool:
             ui.error("Key test failed — key NOT saved. Double-check your NVIDIA NIM key.")
             ui.info("Get a free key at: https://build.nvidia.com/")
 
+    if args.set_model:
+        handled = True
+        config.set_model(args.set_model.strip())
+        ui.ok(f"✓ NVIDIA NIM model set to: {config.get_model()}")
+
+    if args.show_model:
+        handled = True
+        ui.info(f"Configured NVIDIA NIM model: {config.get_model()}")
+
     if args.remove_api:
         handled = True
         config.remove_api_key()
@@ -124,7 +137,7 @@ def handle_api_commands(args, ui) -> bool:
             from core.ai_engine import AIEngine
             if AIEngine.test_key(key, ui):
                 ui.ok("✓ API key is valid and working!")
-                ui.info(f"Model: meta/llama-3.1-70b-instruct  |  Endpoint: https://integrate.api.nvidia.com/v1")
+                ui.info(f"Model: {config.get_model()}  |  Endpoint: https://integrate.api.nvidia.com/v1")
             else:
                 ui.error("✗ API key test failed. Check the key and your internet connection.")
 

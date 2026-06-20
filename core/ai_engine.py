@@ -271,6 +271,115 @@ class AIEngine:
         )
         return self._call(system, user, max_tokens=400)
 
+    def analyze_cors(self, url: str, origin: str, acao: str,
+                     acac: str) -> str | None:
+        """Explain the real-world exploitability of a reflected/loose CORS policy."""
+        if not self.enabled:
+            return None
+        system = (
+            "You are a web security expert. Given a CORS response, explain in 2-3 "
+            "bullet points whether this is exploitable, what an attacker can read, "
+            "and the prerequisites (credentials, victim session). Be concise."
+        )
+        user = (
+            f"URL: {url}\nReflected/allowed Origin: {origin}\n"
+            f"Access-Control-Allow-Origin: {acao}\n"
+            f"Access-Control-Allow-Credentials: {acac}"
+        )
+        return self._call(system, user, max_tokens=300)
+
+    def suggest_ssrf_payloads(self, param: str, url: str) -> list[str]:
+        """Ask AI for target-aware SSRF bypass payloads. Returns a list of strings."""
+        if not self.enabled:
+            return []
+        system = (
+            "You are an SSRF expert. Output ONLY a JSON array of SSRF payload URLs "
+            "that bypass common filters (encoding, redirects, IPv6, decimal IP, "
+            "cloud metadata). No explanations."
+        )
+        user = f"Parameter: {param}\nTarget: {url}\nReturn 8 payloads as a JSON array."
+        result = self._call(system, user, max_tokens=400)
+        if result:
+            try:
+                start = result.find("[")
+                end   = result.rfind("]") + 1
+                if start != -1 and end > start:
+                    return [str(p) for p in json.loads(result[start:end])[:10]]
+            except Exception:
+                pass
+        return []
+
+    def analyze_ssrf_response(self, url: str, payload: str,
+                              body_snippet: str) -> dict | None:
+        """Decide whether a response indicates a real SSRF. Returns dict or None."""
+        if not self.enabled:
+            return None
+        system = (
+            "You are an SSRF expert. Decide if this response proves the server made "
+            "the requested internal/metadata request. Respond with ONLY JSON: "
+            '{"is_ssrf": true/false, "confidence": "high/medium/low", "reason": "one sentence"}'
+        )
+        user = (
+            f"URL: {url}\nPayload: {payload}\n"
+            f"Response (first 800 chars):\n{body_snippet[:800]}"
+        )
+        result = self._call(system, user, max_tokens=150)
+        if result:
+            try:
+                start = result.find("{")
+                end   = result.rfind("}") + 1
+                if start != -1 and end > start:
+                    return json.loads(result[start:end])
+            except Exception:
+                pass
+        return None
+
+    def analyze_graphql(self, url: str, schema_snippet: str) -> str | None:
+        """Highlight the most abusable types/mutations from an introspected schema."""
+        if not self.enabled:
+            return None
+        system = (
+            "You are a GraphQL security researcher. From this introspection result, "
+            "list in bullet points the most security-sensitive types/mutations to "
+            "test (auth, user data, file ops, admin), and any batching/DoS risk. Be brief."
+        )
+        user = f"Endpoint: {url}\nSchema (first 2000 chars):\n{schema_snippet[:2000]}"
+        return self._call(system, user, max_tokens=400)
+
+    def analyze_smuggling(self, url: str, headers: dict) -> str | None:
+        """Assess request-smuggling exposure from front-end/proxy headers."""
+        if not self.enabled:
+            return None
+        system = (
+            "You are an HTTP request smuggling expert. Given these response headers, "
+            "assess in 2-3 bullets the likelihood of a CL.TE / TE.CL desync and which "
+            "front-end/back-end pairing is implied. Be concise."
+        )
+        user = f"URL: {url}\nHeaders: {json.dumps(dict(list(headers.items())[:20]))}"
+        return self._call(system, user, max_tokens=300)
+
+    def validate_secret(self, label: str, snippet: str) -> dict | None:
+        """Judge whether an exposed-file snippet contains a real secret. Returns dict."""
+        if not self.enabled:
+            return None
+        system = (
+            "You are a secrets-detection expert. Decide if this content contains a "
+            "real, sensitive secret (credentials, private key, live API token) versus "
+            "a placeholder/example. Respond with ONLY JSON: "
+            '{"is_secret": true/false, "confidence": "high/medium/low", "reason": "one sentence"}'
+        )
+        user = f"File type: {label}\nContent (first 800 chars):\n{snippet[:800]}"
+        result = self._call(system, user, max_tokens=150)
+        if result:
+            try:
+                start = result.find("{")
+                end   = result.rfind("}") + 1
+                if start != -1 and end > start:
+                    return json.loads(result[start:end])
+            except Exception:
+                pass
+        return None
+
     def prioritize_endpoints(self, endpoints: list[str]) -> list[str]:
         """
         Rank the top 20 most interesting endpoints for security testing.

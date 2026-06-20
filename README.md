@@ -123,11 +123,13 @@ NVIDIA AI Key Management:
   --set-api KEY       Save your NVIDIA NIM API key (auto-tests before saving)
   --remove-api        Remove the saved API key
   --api-test          Test whether the saved key is working
+  --set-model MODEL   Set the NVIDIA NIM model (default: meta/llama-3.1-70b-instruct)
+  --show-model        Show the currently configured model
 
 Scan Options:
   -t, --target        Target domain (e.g. example.com)
   --api-key KEY       Use a key for this session only (not saved)
-  --full              Run all 14 modules
+  --full              Run all 16 modules
   --modules           Comma-separated list of modules to run
   --scope             Define in-scope assets
   --output            Custom output report filename
@@ -180,12 +182,18 @@ Unlike traditional scanners, GhostRecon's AI doesn't just run at the end to gene
 - **Deep JS Inspection** — AI reads each JS file and hunts for hidden API routes, client-side auth bypass logic, dangerous function calls (`eval`, `innerHTML`), and obfuscated secrets that regex patterns miss
 
 ### During IDOR Testing
-- **Smart Response Validation** — AI reads each 200-OK response and determines whether it *actually* leaks private user data, dramatically reducing false positives
+- **Two-Identity Comparison** — GhostRecon swaps the object ID at an endpoint, fetches two records, and reports only when they return distinct per-object data with no ownership check. AI gives a second opinion to cut false positives.
+
+### During SSRF Testing
+- **Bypass Payloads + Validation** — AI suggests target-specific filter-bypass payloads, and judges whether a response really proves the server made the internal/metadata request.
+
+### During Secrets Hunting
+- **Real-Secret Validation** — reachable files are scored by entropy and credential patterns; AI then decides real secret vs placeholder, downgrading (not dropping) likely examples.
 
 ### After All Modules Complete
 - **Vulnerability Chain Analysis** — AI identifies chains like `SSRF → Credential Exposure → Cloud Takeover`, estimates bounty values per finding, and generates PoC outlines for the top 3 vulnerabilities
 
-> **No API key?** No problem. A built-in local rule-based engine handles chain analysis and prioritization offline.
+> **No API key?** No problem. Every module runs fully without AI — the AI layer is purely additive — and a built-in local rule-based engine handles chain analysis offline.
 
 ---
 
@@ -231,15 +239,17 @@ ghostrecon/
     ├── recon.py             ← Crawler & endpoint discovery  [AI: prioritization]
     ├── headers.py           ← Security headers checker      [AI: risk chains]
     ├── js_analysis.py       ← JavaScript secrets scanner    [AI: deep analysis]
-    ├── idor.py              ← IDOR detector                 [AI: response validation]
-    ├── xss.py               ← XSS detection engine
-    ├── sqli.py              ← SQL Injection tester
-    ├── cors.py              ← CORS misconfiguration checker
-    ├── ssrf.py              ← SSRF prober
-    ├── secrets.py           ← Secrets & sensitive file hunter
+    ├── idor.py              ← IDOR detector (two-ID compare) [AI: validation]
+    ├── xss.py               ← XSS detection engine          [AI: payloads]
+    ├── sqli.py              ← SQL Injection tester           [AI: DB fingerprint]
+    ├── ssti.py              ← Server-Side Template Injection
+    ├── cors.py              ← CORS misconfiguration checker  [AI: exploitability]
+    ├── ssrf.py              ← SSRF prober (bypass payloads)  [AI: payloads + validation]
+    ├── open_redirect.py     ← Open redirect detector
+    ├── secrets.py           ← Secrets & sensitive file hunter [AI: secret validation]
     ├── nuclei_sim.py        ← Nuclei-style template checks
-    ├── graphql.py           ← GraphQL tester
-    ├── smuggling.py         ← HTTP Smuggling detector
+    ├── graphql.py           ← GraphQL tester                [AI: abusable surface]
+    ├── smuggling.py         ← HTTP Smuggling detector       [AI: desync assessment]
     ├── params.py            ← Parameter discovery
     └── reporter.py          ← Report generator
 ```

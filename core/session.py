@@ -83,7 +83,7 @@ class ScanSession:
             f"Target   : {self.target}",
             f"Modules  : {', '.join(self.modules)}",
             f"Scope    : {self.scope or 'all discovered assets in-scope'}",
-            f"AI       : {'NVIDIA NIM (' + (self.api_key and 'enabled') + ')' if self.api_key else 'local engine (no key)'}",
+            f"AI       : {'NVIDIA NIM (enabled)' if self.api_key else 'local engine (no key)'}",
             f"Threads  : {self.threads}  |  Delay: {self.delay}s  |  Timeout: {self.timeout}s",
             f"Output   : {self.output_dir}",
         ])

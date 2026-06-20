@@ -90,6 +90,9 @@ class ReconModule(BaseModule):
         self._enumerate_subdomains()
         self._find_osint_urls()
 
+        # Mine JavaScript for hidden endpoints and parameter names
+        self._mine_javascript()
+
         # Always seed endpoints with known-injectable probe paths
         # so XSS/SQLi have targets even if the crawl fails
         self._probe_common_paths()
@@ -265,6 +268,50 @@ class ReconModule(BaseModule):
             return self.target in parsed.netloc
         except Exception:
             return False
+
+    def _mine_javascript(self):
+        """
+        Fetch same-domain JS files referenced so far and extract:
+          - hidden API/route paths (e.g. "/api/v1/orders")
+          - parameter names used in fetch/axios/XHR calls
+        Discovered endpoints feed XSS/SQLi; param names are shared via ctx.
+        """
+        js_urls = [u for u in self.endpoints if u.split("?")[0].endswith(".js")]
+        if not js_urls:
+            return
+
+        self.ui.info(f"Mining {min(len(js_urls), 15)} JS file(s) for endpoints and params...")
+        path_re  = re.compile(r'["\'](\/[A-Za-z0-9_\-\/]{2,60})["\']')
+        param_re = re.compile(r'[?&]([A-Za-z0-9_\-]{2,30})=')
+        body_param_re = re.compile(r'["\']([A-Za-z0-9_\-]{2,30})["\']\s*:')
+
+        discovered_params = set(self.ctx.get("js_params", []))
+        for js_url in js_urls[:15]:
+            try:
+                resp = self.session.get(js_url, timeout=self.timeout)
+                self._throttle()
+            except Exception:
+                continue
+            if not resp or resp.status_code != 200:
+                continue
+            text = resp.text
+
+            for m in path_re.finditer(text):
+                path = m.group(1)
+                if any(seg in path for seg in ("api", "v1", "v2", "user", "account",
+                                               "admin", "order", "graphql", "search")):
+                    self.endpoints.add(urllib.parse.urljoin(self.base_url, path))
+            for m in param_re.finditer(text):
+                discovered_params.add(m.group(1))
+            for m in body_param_re.finditer(text):
+                discovered_params.add(m.group(1))
+
+        if discovered_params:
+            self.ctx["js_params"] = sorted(discovered_params)
+            # Seed base-URL probes with the mined params so XSS/SQLi test them.
+            for p in list(discovered_params)[:40]:
+                self.endpoints.add(f"{self.base_url}?{p}=test")
+            self.ui.ok(f"JS mining found {len(discovered_params)} parameter name(s)")
 
     def _is_ip(self, host):
         try:

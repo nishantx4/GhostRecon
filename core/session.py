@@ -22,6 +22,8 @@ from modules.smuggling  import SmugglingModule
 from modules.cors       import CORSModule
 from modules.ssrf       import SSRFModule
 from modules.secrets    import SecretsModule
+from modules.ssti       import SSTIModule
+from modules.open_redirect import OpenRedirectModule
 from modules.reporter   import ReportModule
 
 
@@ -38,6 +40,8 @@ MODULE_MAP = {
     'smuggling': SmugglingModule,
     'cors':      CORSModule,
     'ssrf':      SSRFModule,
+    'ssti':      SSTIModule,
+    'redirect':  OpenRedirectModule,
     'secrets':   SecretsModule,
     'report':    ReportModule,
 }
@@ -49,7 +53,7 @@ class ScanSession:
                  threads=10, timeout=10, delay=0.5, verbose=False, ui=None):
         self.target     = self._normalize_target(target)
         self.api_key    = api_key
-        self.modules    = modules or ['recon','headers','js','params','nuclei','xss','idor','cors','ssrf','report']
+        self.modules    = modules or ['recon','headers','js','params','nuclei','xss','idor','cors','ssrf','redirect','report']
         self.scope      = scope
         self.output_dir = output_dir
         self.output_file = output_file

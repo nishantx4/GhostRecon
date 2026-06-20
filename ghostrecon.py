@@ -172,12 +172,12 @@ def main():
         if args.full:
             modules = ['recon', 'headers', 'js', 'params', 'nuclei',
                        'xss', 'idor', 'sqli', 'graphql', 'smuggling',
-                       'cors', 'ssrf', 'secrets', 'report']
+                       'cors', 'ssrf', 'ssti', 'redirect', 'secrets', 'report']
         elif args.modules:
             modules = [m.strip() for m in args.modules.split(',')]
         else:
             modules = ['recon', 'headers', 'js', 'params', 'nuclei',
-                       'xss', 'idor', 'cors', 'ssrf', 'report']
+                       'xss', 'idor', 'cors', 'ssrf', 'redirect', 'report']
 
     if not target:
         ui.error("No target specified. Exiting.")

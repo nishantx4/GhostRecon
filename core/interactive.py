@@ -15,14 +15,17 @@ class InteractiveMenu:
         
         # 2. Select Modules
         self.ui.subsection("Available Modules")
-        available = ['recon', 'headers', 'js', 'params', 'nuclei', 'xss', 'idor', 'sqli', 'cors', 'ssrf', 'report']
+        available = ['recon', 'headers', 'js', 'params', 'nuclei', 'xss', 'idor',
+                     'sqli', 'graphql', 'smuggling', 'cors', 'ssrf', 'ssti',
+                     'redirect', 'secrets', 'report']
         for i, m in enumerate(available, 1):
             print(f"    {i}. {m}")
         
         selection = input(f"\n{self.ui.c('BOLD', '  [?] Enter modules (comma-separated) or leave blank for default: ')}").strip()
         
         if not selection:
-            self.modules = ['recon', 'headers', 'js', 'params', 'nuclei', 'idor', 'cors', 'report']
+            self.modules = ['recon', 'headers', 'js', 'params', 'nuclei', 'xss',
+                            'idor', 'cors', 'ssrf', 'redirect', 'report']
         else:
             self.modules = [available[int(i)-1] for i in selection.split(',') if i.isdigit() and int(i) <= len(available)]
 

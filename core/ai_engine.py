@@ -16,11 +16,19 @@ Active hunting roles:
 """
 import json
 import requests as _requests
+import core.config as config
 
 
 # ── Model config ──────────────────────────────────────────────────────────────
 NVIDIA_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 NVIDIA_MODEL      = "qwen/qwen3.5-122b-a10b"
+
+# Models that support the qwen-style thinking mode kwarg.
+_THINKING_MODELS = ("qwen/", "deepseek-ai/")
+
+
+def _supports_thinking(model: str) -> bool:
+    return any(model.startswith(p) for p in _THINKING_MODELS)
 
 
 class AIEngine:

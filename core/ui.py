@@ -88,6 +88,55 @@ class UI:
         self._print(f"  {self.c(Colors.BOLD, self.c(Colors.CYAN, '◉ ' + title.upper()))}")
         self._print(f"{line}")
 
+    def panel(self, title, lines, color=None):
+        """Render a boxed panel with a title and a list of content lines."""
+        color = color or Colors.TEAL
+        width = 68
+        top = self.c(color, '╭' + '─' * width + '╮')
+        bot = self.c(color, '╰' + '─' * width + '╯')
+        self._print(f"\n  {top}")
+        title_txt = f" {title} "
+        pad = width - len(title_txt)
+        self._print(f"  {self.c(color, '│')}{self.c(Colors.BOLD, title_txt)}{' ' * max(0, pad)}{self.c(color, '│')}")
+        self._print(f"  {self.c(color, '├' + '─' * width + '┤')}")
+        for ln in lines:
+            visible = self._strip(ln)
+            pad = width - len(visible) - 1
+            self._print(f"  {self.c(color, '│')} {ln}{' ' * max(0, pad)}{self.c(color, '│')}")
+        self._print(f"  {bot}")
+
+    def badge(self, severity):
+        """Return a colored severity badge string."""
+        sev_colors = {
+            'critical': Colors.BG_RED, 'high': Colors.ORANGE,
+            'medium': Colors.YELLOW, 'low': Colors.CYAN, 'info': Colors.BLUE,
+        }
+        col = sev_colors.get(severity.lower(), Colors.WHITE)
+        return self.c(col, f" {severity.upper()} ")
+
+    def sev_bar(self, counts):
+        """Render a single-line stacked severity bar from a counts dict."""
+        order = [('critical', Colors.RED), ('high', Colors.ORANGE),
+                 ('medium', Colors.YELLOW), ('low', Colors.CYAN), ('info', Colors.BLUE)]
+        total = sum(counts.get(s, 0) for s, _ in order) or 1
+        bar = ''
+        for sev, col in order:
+            n = counts.get(sev, 0)
+            seg = max(0, round(40 * n / total))
+            if n and seg == 0:
+                seg = 1
+            bar += self.c(col, '█' * seg)
+        legend = '  '.join(
+            f"{self.c(col, '■')} {sev[:4]}:{counts.get(sev, 0)}" for sev, col in order
+        )
+        self._print(f"  {bar}")
+        self._print(f"  {legend}")
+
+    @staticmethod
+    def _strip(text):
+        import re as _re
+        return _re.sub(r'\x1b\[[0-9;]*m', '', text)
+
     def subsection(self, title):
         self._print(f"\n  {self.c(Colors.CYAN, '┌─')} {self.c(Colors.BOLD, title)}")
 

@@ -360,6 +360,15 @@ class SQLiModule(BaseModule):
                     if base_db:
                         continue  # Error in baseline too — not injected
 
+                    # Optional AI augmentation: confirm DB type / weed out FPs.
+                    if self.ai and self.ai.enabled:
+                        try:
+                            verdict = self.ai.analyze_sqli_error(url, param, resp.text)
+                            if verdict:
+                                self.ui.ai(verdict.split("\n")[0][:200])
+                        except Exception:
+                            pass
+
                     if self.verbose:
                         self.ui.warn(f"Error-based SQLi: {url} param={param} DB={db_type}")
                     return {
@@ -401,9 +410,15 @@ class SQLiModule(BaseModule):
                 if condition_diff < threshold:
                     continue
 
-                # Condition 3: true payload response closer to baseline than false
+                # Condition 3: true payload response closer to baseline than
+                # the false payload response (classic boolean-blind signature).
                 false_diff = abs(len_false - baseline_len)
+                true_diff  = abs(len_true - baseline_len)
                 if len_true == len_false:
+                    continue
+                if true_diff >= false_diff:
+                    # 'true' is not closer to baseline than 'false' -> not a
+                    # convincing boolean-blind signal, skip to avoid FPs.
                     continue
 
                 if self.verbose:
@@ -421,8 +436,6 @@ class SQLiModule(BaseModule):
                         f"Difference: {condition_diff} chars"
                     )
                 }
-
-                time.sleep(self.delay)
             except Exception:
                 continue
         return None

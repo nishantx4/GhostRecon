@@ -12,6 +12,7 @@ bug bounty hunting smarter, faster, and a little more fun.
 Usage:
   python ghostrecon.py -t example.com [options]
   python ghostrecon.py --set-api  nvapi-xxxx      (save your NVIDIA key)
+  python ghostrecon.py --set-model MODEL          (choose the NIM model)
   python ghostrecon.py --api-test                  (verify the key works)
   python ghostrecon.py --remove-api                (delete saved key)
   python ghostrecon.py --interactive

@@ -23,8 +23,8 @@ Footer {
 /* Dashboard Layout */
 DashboardScreen {
     layout: grid;
-    grid-size: 4 3;
-    grid-rows: 1fr 12 3;
+    grid-size: 4 2;
+    grid-rows: 1fr 10;
     grid-columns: 1fr 1fr 1fr 1fr;
     grid-gutter: 1 2;
     padding: 1 2;
@@ -52,15 +52,6 @@ DashboardScreen {
     border: round #ef4444;
     background: #111827;
     padding: 1;
-}
-
-#severity_chart {
-    row-span: 1;
-    column-span: 4;
-    border: round #f59e0b;
-    background: #111827;
-    padding: 1;
-    content-align: center middle;
 }
 
 /* Widget specifics */

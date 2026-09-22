@@ -24,7 +24,7 @@ class ParamModule(BaseModule):
         endpoints = self.ctx.get("endpoints", [self.base_url])
         params_found = []
 
-        for ep in endpoints[:20]:
+        for ep in endpoints:
             parsed = urllib.parse.urlparse(ep)
             if parsed.query:
                 for k in urllib.parse.parse_qs(parsed.query).keys():

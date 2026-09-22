@@ -100,8 +100,8 @@ class GhostReconApp(App):
                 )
                 
             elif event_type == "severity_updated":
-                chart = dashboard.query_one("#severity_chart")
-                chart.update_counts(
+                panel = dashboard.query_one("#finding_panel")
+                panel.update_counts(
                     critical=data.get("critical", 0),
                     high=data.get("high", 0),
                     medium=data.get("medium", 0),

@@ -1,5 +1,5 @@
 from textual.widgets import Static, ProgressBar
-from textual.containers import Vertical
+from textual.containers import VerticalScroll
 from textual.app import ComposeResult
 from textual.reactive import reactive
 
@@ -8,7 +8,7 @@ class ScanProgress(Static):
     
     def compose(self) -> ComposeResult:
         yield Static("Module Progress", classes="panel-title")
-        self.module_list = Vertical(id="module_list")
+        self.module_list = VerticalScroll(id="module_list")
         yield self.module_list
         self.progress = ProgressBar(total=100, show_eta=False, id="scan_progress_bar")
         yield self.progress

@@ -53,8 +53,10 @@ class IDORModule(BaseModule):
         self.ui.info(f"Comparing object access across {len(templates)} ID endpoint(s)...")
         found = 0
 
-        for id_type, url in idor_candidates[:30]:
+        for prefix, suffix in templates[:30]:
             try:
+                test_id = "1"
+                url = f"{prefix}{test_id}{suffix}"
                 resp = s.get(url, timeout=self.timeout)
                 if resp.status_code == 200 and len(resp.text) > 50:
                     

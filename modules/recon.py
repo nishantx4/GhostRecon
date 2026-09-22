@@ -23,17 +23,7 @@ class ReconModule(BaseModule):
 
     def __init__(self, target, db, ui, context, timeout=10, delay=0.3,
                  threads=10, verbose=False, ai=None, output_dir=None):
-        self.target     = target
-        self.db         = db
-        self.ui         = ui
-        self.ctx        = context
-        self.timeout    = timeout
-        self.delay      = delay
-        self.threads    = threads
-        self.verbose    = verbose
-        self.ai         = ai
-        self.output_dir = output_dir
-        self.base_url   = f"https://{target}" if not target.startswith("http") else target
+        super().__init__(target, db, ui, context, timeout, delay, threads, verbose, ai, output_dir)
         self.session    = self._make_session()
         self.visited    = set()
         self.endpoints  = set()
@@ -330,8 +320,8 @@ class ReconModule(BaseModule):
         if self.tool_runner and self.tool_runner.is_installed("subfinder"):
             self.ui.info(f"Running subfinder for {domain} ...")
             try:
-                cmd = f"subfinder -d {domain} -silent -all -timeout 10"
-                for line in self.tool_runner.run_sync(cmd):
+                res = self.tool_runner.run_sync("subfinder", ["-d", domain, "-silent", "-all", "-timeout", "10"], parse_json=False)
+                for line in res.stdout_lines:
                     sub = line.strip().lower()
                     if sub.endswith(domain):
                         found.add(sub)
@@ -372,9 +362,8 @@ class ReconModule(BaseModule):
         if self.tool_runner and self.tool_runner.is_installed("waybackurls"):
             self.ui.info(f"Running waybackurls for {domain} ...")
             try:
-                # Pipe into httpx if available to check liveliness
-                cmd = f"echo {domain} | waybackurls"
-                for line in self.tool_runner.run_sync(cmd):
+                res = self.tool_runner.run_sync("waybackurls", [], parse_json=False, stdin_data=domain)
+                for line in res.stdout_lines:
                     u = line.strip()
                     if u and u not in self.endpoints:
                         self.endpoints.add(u)
@@ -407,10 +396,8 @@ class ReconModule(BaseModule):
             
         self.ui.info(f"Running Katana headless crawler on {self.base_url} ...")
         try:
-            # -jc: js crawl, -d: depth, -aff: auto form fill
-            cmd = f"katana -u {self.base_url} -d 2 -jc -aff -silent"
-            added = 0
-            for line in self.tool_runner.run_sync(cmd):
+            res = self.tool_runner.run_sync("katana", ["-u", self.base_url, "-d", "2", "-jc", "-aff", "-silent"], parse_json=False)
+            for line in res.stdout_lines:
                 u = line.strip()
                 if u and u.startswith("http") and u not in self.endpoints:
                     self.endpoints.add(u)

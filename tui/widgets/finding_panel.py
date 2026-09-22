@@ -16,7 +16,7 @@ class FindingPanel(Static):
 
     def add_finding(self, title: str, severity: str, url: str, confidence: str):
         self.finding_count += 1
-        finding_widget = Static(f"[{severity.upper()}] {title} | {url} | Conf: {confidence}", classes="finding-item")
+        finding_widget = Static(f"[{severity.upper()}] {title}\nURL: {url} | Conf: {confidence}", classes="finding-item")
         self.query_one("#finding_list").mount(finding_widget)
 
     def update_counts(self, critical, high, medium, low):

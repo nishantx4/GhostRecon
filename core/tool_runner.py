@@ -263,6 +263,7 @@ class ExternalToolRunner:
         timeout: int = 300,
         parse_json: bool = True,
         on_line: Callable[[str], None] | None = None,
+        stdin_data: str | None = None,
     ) -> ToolResult:
         """
         Synchronous wrapper for run_tool().
@@ -276,16 +277,16 @@ class ExternalToolRunner:
                 with concurrent.futures.ThreadPoolExecutor() as pool:
                     future = pool.submit(
                         asyncio.run,
-                        self.run_tool(tool, args, timeout, parse_json, on_line),
+                        self.run_tool(tool, args, timeout, parse_json, on_line, None, stdin_data),
                     )
                     return future.result(timeout=timeout + 10)
             else:
                 return loop.run_until_complete(
-                    self.run_tool(tool, args, timeout, parse_json, on_line)
+                    self.run_tool(tool, args, timeout, parse_json, on_line, None, stdin_data)
                 )
         except RuntimeError:
             return asyncio.run(
-                self.run_tool(tool, args, timeout, parse_json, on_line)
+                self.run_tool(tool, args, timeout, parse_json, on_line, None, stdin_data)
             )
 
     def run_pipeline_sync(self, steps: list[ToolStep]) -> PipelineResult:

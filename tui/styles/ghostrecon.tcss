@@ -73,6 +73,7 @@ DashboardScreen {
     border: solid #ef4444;
     background: #1e293b;
     margin-bottom: 1;
+    height: auto;
 }
 
 Collapsible {

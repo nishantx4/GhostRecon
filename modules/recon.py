@@ -274,55 +274,101 @@ class ReconModule(BaseModule):
             return False
 
     def _enumerate_subdomains(self):
-        """Query crt.sh for subdomains."""
+        """Query subdomains using subfinder or fallback to crt.sh."""
         domain = self.target.split(':')[0]
         if self._is_ip(domain):
             return
 
-        self.ui.info(f"Querying crt.sh for subdomains of {domain} ...")
-        url = f"https://crt.sh/?q=%25.{domain}&output=json"
-        try:
-            # crt.sh can be slow/unreliable, so we use a strict timeout
-            r = self.session.get(url, timeout=15)
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    found = set()
-                    for entry in data:
-                        name = entry.get('name_value', '').lower()
-                        if name and '*' not in name:
-                            for sub in name.split('\n'):
-                                if sub.endswith(domain):
-                                    found.add(sub.strip())
-                    if found:
-                        self.ui.ok(f"crt.sh found {len(found)} subdomains")
-                        existing = self.ctx.setdefault("subdomains", [])
-                        self.ctx["subdomains"] = list(set(existing + list(found)))
-                except Exception:
-                    pass
-        except Exception:
-            self.ui.warn("crt.sh query timed out or failed.")
+        found = set()
+        if self.tool_runner and self.tool_runner.is_installed("subfinder"):
+            self.ui.info(f"Running subfinder for {domain} ...")
+            try:
+                cmd = f"subfinder -d {domain} -silent -all -timeout 10"
+                for line in self.tool_runner.run_sync(cmd):
+                    sub = line.strip().lower()
+                    if sub.endswith(domain):
+                        found.add(sub)
+            except Exception as e:
+                self.ui.warn(f"Subfinder failed: {e}")
+        else:
+            self.ui.info(f"Querying crt.sh for subdomains of {domain} ...")
+            url = f"https://crt.sh/?q=%25.{domain}&output=json"
+            try:
+                # crt.sh can be slow/unreliable, so we use a strict timeout
+                r = self.session.get(url, timeout=15)
+                if r.status_code == 200:
+                    try:
+                        data = r.json()
+                        for entry in data:
+                            name = entry.get('name_value', '').lower()
+                            if name and '*' not in name:
+                                for sub in name.split('\n'):
+                                    if sub.endswith(domain):
+                                        found.add(sub.strip())
+                    except Exception:
+                        pass
+            except Exception:
+                self.ui.warn("crt.sh query timed out or failed.")
+                
+        if found:
+            self.ui.ok(f"Discovered {len(found)} subdomains")
+            existing = self.ctx.setdefault("subdomains", [])
+            self.ctx["subdomains"] = list(set(existing + list(found)))
 
     def _find_osint_urls(self):
-        """Query AlienVault OTX for known URLs."""
+        """Query waybackurls/gau if available, fallback to AlienVault OTX."""
         domain = self.target.split(':')[0]
         if self._is_ip(domain):
             return
 
-        self.ui.info(f"Querying AlienVault OTX for historical URLs on {domain} ...")
-        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=150"
-        try:
-            r = self.session.get(url, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                url_list = data.get("url_list", [])
-                added = 0
-                for item in url_list:
-                    u = item.get("url")
+        added = 0
+        if self.tool_runner and self.tool_runner.is_installed("waybackurls"):
+            self.ui.info(f"Running waybackurls for {domain} ...")
+            try:
+                # Pipe into httpx if available to check liveliness
+                cmd = f"echo {domain} | waybackurls"
+                for line in self.tool_runner.run_sync(cmd):
+                    u = line.strip()
                     if u and u not in self.endpoints:
                         self.endpoints.add(u)
                         added += 1
-                if added > 0:
-                    self.ui.ok(f"AlienVault OTX found {added} historical URLs")
-        except Exception:
-            self.ui.warn("AlienVault OTX query timed out or failed.")
+            except Exception as e:
+                self.ui.warn(f"Waybackurls failed: {e}")
+        else:
+            self.ui.info(f"Querying AlienVault OTX for historical URLs on {domain} ...")
+            url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/url_list?limit=150"
+            try:
+                r = self.session.get(url, timeout=15)
+                if r.status_code == 200:
+                    data = r.json()
+                    url_list = data.get("url_list", [])
+                    for item in url_list:
+                        u = item.get("url")
+                        if u and u not in self.endpoints:
+                            self.endpoints.add(u)
+                            added += 1
+            except Exception:
+                self.ui.warn("AlienVault OTX query timed out or failed.")
+                
+        if added > 0:
+            self.ui.ok(f"Discovered {added} historical URLs")
+            
+    def _run_katana(self):
+        """Run ProjectDiscovery's Katana crawler if installed."""
+        if not self.tool_runner or not self.tool_runner.is_installed("katana"):
+            return
+            
+        self.ui.info(f"Running Katana headless crawler on {self.base_url} ...")
+        try:
+            # -jc: js crawl, -d: depth, -aff: auto form fill
+            cmd = f"katana -u {self.base_url} -d 2 -jc -aff -silent"
+            added = 0
+            for line in self.tool_runner.run_sync(cmd):
+                u = line.strip()
+                if u and u.startswith("http") and u not in self.endpoints:
+                    self.endpoints.add(u)
+                    added += 1
+            if added > 0:
+                self.ui.ok(f"Katana discovered {added} endpoints")
+        except Exception as e:
+            self.ui.warn(f"Katana failed: {e}")

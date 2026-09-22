@@ -72,18 +72,20 @@ Get a free NVIDIA NIM API key at: https://build.nvidia.com/
     scan_group = parser.add_argument_group('Scan Options')
     scan_group.add_argument('-t', '--target',      help='Target domain (e.g. example.com)')
     scan_group.add_argument('--api-key',           help='NVIDIA NIM API key for this session only (not saved)')
-    scan_group.add_argument('--full',              action='store_true', help='Run all modules')
-    scan_group.add_argument('--modules',           help='Comma-separated modules to run')
+    scan_group.add_argument('--preset',            choices=['quick', 'standard', 'full'], default='standard', help='Scan profile preset')
+    scan_group.add_argument('--modules',           help='Comma-separated modules to run (overrides preset)')
     scan_group.add_argument('--scope',             help='Scope definition')
     scan_group.add_argument('--output',            help='Output report file')
     scan_group.add_argument('--output-dir',        default='./ghostrecon_output', help='Output directory')
     scan_group.add_argument('--threads',           type=int, default=10, help='Threads (default: 10)')
     scan_group.add_argument('--timeout',           type=int, default=10, help='Request timeout (default: 10s)')
     scan_group.add_argument('--delay',             type=float, default=0.5, help='Delay between requests (default: 0.5s)')
-    scan_group.add_argument('--no-color',          action='store_true', help='Disable colored output')
-    scan_group.add_argument('--verbose', '-v',     action='store_true', help='Verbose output')
-    scan_group.add_argument('--interactive', '-i', action='store_true', help='Interactive menu mode')
-    scan_group.add_argument('--version',           action='version', version='GhostRecon v2.0 by Nishant')
+    scan_group.add_argument('--confidence',        type=int, default=60, help='Minimum confidence score (0-100) to report')
+    scan_group.add_argument('--no-tui',            action='store_true', help='Disable Textual TUI (run headless)')
+    scan_group.add_argument('--no-color',          action='store_true', help='Disable colored output (headless only)')
+    scan_group.add_argument('--verbose', '-v',     action='store_true', help='Verbose output (headless only)')
+    scan_group.add_argument('--interactive', '-i', action='store_true', help='Legacy interactive mode')
+    scan_group.add_argument('--version',           action='version', version='GhostRecon v3.0 by Nishant')
 
     return parser.parse_args()
 
@@ -131,40 +133,27 @@ def handle_api_commands(args, ui) -> bool:
     return handled
 
 
-def main():
-    args = parse_args()
-    ui   = UI(no_color=args.no_color)
-    print_banner(ui)
+def get_preset_modules(preset: str):
+    if preset == 'quick':
+        return ['recon', 'cms', 'headers', 'secrets', 'cors', 'nuclei', 'report']
+    elif preset == 'full':
+        from core.session import MODULE_MAP
+        return list(MODULE_MAP.keys())
+    else: # standard
+        return ['recon', 'cms', 'headers', 'sub_take', 'secrets', 'idor', 'sqli', 'xss', 'cors', 'ssrf', 'nuclei', 'report']
 
-    # Handle API management commands first (no scan needed)
-    if handle_api_commands(args, ui):
-        return
-
-    # Resolve API key: CLI flag overrides saved key
-    api_key = (args.api_key or "").strip() or config.get_api_key()
-    if api_key:
-        ui.ok("NVIDIA AI engine active — AI-assisted hunting enabled 🤖")
-    else:
-        ui.warn("No API key set — running in local-only mode.")
-        ui.info("Tip: python ghostrecon.py --set-api nvapi-xxxx  (free at build.nvidia.com)")
-    ui.blank()
-
-    # Determine target and modules
+def run_headless(args, ui, api_key):
+    """Run in legacy headless CLI mode."""
     if args.interactive or not args.target:
         from core.interactive import InteractiveMenu
         menu = InteractiveMenu(ui)
         target, modules = menu.run()
     else:
         target = args.target
-        if args.full:
-            modules = ['recon', 'headers', 'js', 'params', 'nuclei',
-                       'xss', 'idor', 'sqli', 'graphql', 'smuggling',
-                       'cors', 'ssrf', 'secrets', 'report']
-        elif args.modules:
+        if args.modules:
             modules = [m.strip() for m in args.modules.split(',')]
         else:
-            modules = ['recon', 'headers', 'js', 'params', 'nuclei',
-                       'xss', 'idor', 'cors', 'ssrf', 'report']
+            modules = get_preset_modules(args.preset)
 
     if not target:
         ui.error("No target specified. Exiting.")
@@ -190,6 +179,55 @@ def main():
         ui.error("\n\n[!] Scan interrupted by user. Saving partial results...")
         session.save_partial()
         sys.exit(0)
+
+def main():
+    args = parse_args()
+    ui   = UI(no_color=args.no_color)
+
+    # Handle API management commands first (no scan needed)
+    if handle_api_commands(args, ui):
+        return
+
+    # Resolve API key: CLI flag overrides saved key
+    api_key = (args.api_key or "").strip() or config.get_api_key()
+
+    # Determine if we should use TUI
+    use_tui = not args.no_tui and sys.stdout.isatty() and not args.interactive
+
+    if use_tui:
+        try:
+            from tui.app import GhostReconApp
+            
+            # Prepare config to pass to TUI
+            tui_config = {
+                "target": args.target,
+                "api_key": api_key,
+                "preset": args.preset,
+                "modules": [m.strip() for m in args.modules.split(',')] if args.modules else get_preset_modules(args.preset),
+                "threads": args.threads,
+                "timeout": args.timeout,
+                "delay": args.delay,
+                "output_dir": args.output_dir,
+            }
+            
+            app = GhostReconApp(config=tui_config)
+            app.run()
+            
+        except ImportError as e:
+            ui.error(f"Failed to load TUI: {e}")
+            ui.info("Falling back to headless mode...")
+            print_banner(ui)
+            run_headless(args, ui, api_key)
+    else:
+        print_banner(ui)
+        if api_key:
+            ui.ok("NVIDIA AI engine active — AI-assisted hunting enabled 🤖")
+        else:
+            ui.warn("No API key set — running in local-only mode.")
+            ui.info("Tip: python ghostrecon.py --set-api nvapi-xxxx  (free at build.nvidia.com)")
+        ui.blank()
+        
+        run_headless(args, ui, api_key)
 
 
 if __name__ == '__main__':

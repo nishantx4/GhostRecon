@@ -41,7 +41,38 @@ class CORSModule(BaseModule):
                 acac = resp.headers.get("Access-Control-Allow-Credentials", "")
 
                 if acao == origin or acao == "*":
-                    severity = "high" if (acac.lower() == "true" and acao != "*") else "medium"
+                    creds_allowed = acac.lower() == "true"
+
+                    # ── FP Fix: Wildcard without credentials is standard for public APIs ──
+                    if acao == "*" and not creds_allowed:
+                        # This is normal for public APIs/CDNs — downgrade to info
+                        self.db.add(
+                            title="CORS: Wildcard Origin (Public API — Informational)",
+                            severity="info", url=self.base_url, module=self.NAME,
+                            description=(
+                                "The server returns Access-Control-Allow-Origin: * without credentials. "
+                                "This is standard behavior for public APIs and CDN resources. "
+                                "No authentication data can be stolen via this configuration."
+                            ),
+                            remediation="No action needed if this is intentionally a public endpoint.",
+                            cvss="0.0",
+                            confidence="CONFIRMED",
+                            confidence_score=100,
+                        )
+                        self.ui.find("info", "CORS: Wildcard (public, no credentials)", self.base_url)
+                        break
+
+                    # Reflected origin WITH credentials — actually dangerous
+                    if creds_allowed and acao != "*":
+                        severity = "high"
+                        confidence_score = 90
+                    elif acao == "null":
+                        severity = "medium"
+                        confidence_score = 75
+                    else:
+                        severity = "medium"
+                        confidence_score = 70
+
                     self.db.add(
                         title=f"CORS Misconfiguration — Reflected Origin: {acao}",
                         severity=severity, url=self.base_url, module=self.NAME,
@@ -55,7 +86,9 @@ class CORSModule(BaseModule):
                             "Do not combine Access-Control-Allow-Credentials: true with wildcard origins."
                         ),
                         cvss="7.4" if severity == "high" else "5.4",
-                        confidence="high",
+                        confidence="HIGH" if creds_allowed else "MEDIUM",
+                        confidence_score=confidence_score,
+                        validation_steps=["origin_reflected", "credentials_checked"],
                     )
                     self.ui.find(severity, f"CORS Misconfiguration ({acao})", self.base_url)
                     break

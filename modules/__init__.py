@@ -25,6 +25,19 @@ class BaseModule:
         self.ai         = ai
         self.output_dir = output_dir
         self.base_url   = f"https://{target}" if not target.startswith("http") else target
+        
+        # Instantiate common tools
+        try:
+            from core.validator import Validator
+            self.validator = Validator()
+        except ImportError:
+            self.validator = None
+            
+        try:
+            from core.tool_runner import ExternalToolRunner
+            self.tool_runner = ExternalToolRunner(self.ui)
+        except ImportError:
+            self.tool_runner = None
 
     def _session(self):
         if not requests:

@@ -56,9 +56,51 @@ class NucleiModule(BaseModule):
     ]
 
     def run(self):
-        self.ui.section("Nuclei — Common Vulnerability Checks")
+        self.ui.section("Nuclei — Vulnerability Scanning")
         if not requests:
             return
+
+        # Check if real Nuclei is available
+        from core.tool_runner import ExternalToolRunner
+        runner = ExternalToolRunner(self.ui)
+        if runner.is_installed("nuclei"):
+            self.ui.info("Running real Nuclei scanner...")
+            # We use nuclei asynchronously in the TUI, but here we do a sync fallback
+            # We won't block the whole scan on nuclei unless it's headless.
+            # A better approach is the session orchestrator handling it.
+            # For now, we'll just run a fast nuclei scan on the base URL.
+            args = ["-u", self.base_url, "-t", "cves,exposures", "-j"]
+            result = runner.run_sync("nuclei", args, timeout=120)
+            
+            if result.success and result.parsed_results:
+                for item in result.parsed_results:
+                    info = item.get("info", {})
+                    severity = info.get("severity", "info").lower()
+                    if severity not in ["critical", "high", "medium", "low", "info"]:
+                        severity = "info"
+                        
+                    self.db.add(
+                        title=info.get("name", "Nuclei Finding"),
+                        severity=severity,
+                        url=item.get("matched-at", self.base_url),
+                        module=self.NAME,
+                        description=info.get("description", ""),
+                        remediation=info.get("remediation", ""),
+                        cvss=str(info.get("classification", {}).get("cvss-metrics", "")),
+                        confidence="HIGH",
+                        confidence_score=85,
+                        validation_steps=["nuclei_verified"],
+                        external_tool="nuclei"
+                    )
+                    self.ui.find(severity, info.get("name", "Finding"), item.get("matched-at", self.base_url))
+                return
+            elif result.success:
+                self.ui.info("Nuclei found no vulnerabilities.")
+                return
+
+        # Fallback to internal checks
+        self.ui.info("Running built-in common vulnerability checks...")
+        
         try:
             import urllib3; urllib3.disable_warnings()
         except Exception:
@@ -66,19 +108,50 @@ class NucleiModule(BaseModule):
 
         s = self._session()
         found = 0
+        baseline = self.ctx.get('baseline_profile')
+
         for path, title, severity, cvss, desc in self.CHECKS:
             url = urllib.parse.urljoin(self.base_url, path)
             try:
                 resp = s.get(url, timeout=self.timeout, allow_redirects=False)
                 if resp.status_code in (200, 206):
-                    # Extra validation: check for meaningful content
-                    if path == "/.env" and "APP_" not in resp.text and "DB_" not in resp.text and len(resp.text) < 10:
+                    body = resp.text
+                    ct = resp.headers.get("Content-Type", "")
+                    
+                    # FP Check: Soft-404
+                    if baseline and baseline.matches_soft_404(body, resp.status_code):
                         continue
+                        
+                    # FP Check: HTML masquerading
+                    is_html = "text/html" in ct or "<html" in body.lower()[:100]
+                    
+                    # Content validation rules per path
+                    valid = False
+                    if path.startswith("/.env") and not is_html:
+                        valid = any(x in body for x in ["APP_", "DB_", "SECRET", "KEY="])
+                    elif path.endswith((".zip", ".tar.gz", ".bak", ".sqlite", ".db")) and not is_html:
+                        valid = len(resp.content) > 100
+                    elif path == "/.git/HEAD" and not is_html:
+                        valid = "ref: refs/heads" in body
+                    elif path == "/phpinfo.php":
+                        valid = "<title>phpinfo()</title>" in body or "PHP Version" in body
+                    elif path == "/server-status":
+                        valid = "Apache Server Status" in body
+                    elif path.endswith(".html") or path.endswith("/"):
+                        # Allowed to be HTML
+                        valid = len(body) > 10
+                    elif not is_html:
+                        valid = len(body) > 10
+                        
+                    if not valid:
+                        continue
+                        
                     added = self.db.add(
                         title=title, severity=severity, url=url, module=self.NAME,
                         description=desc,
                         remediation="Remove or restrict access to this file/endpoint.",
-                        cvss=cvss, confidence="high",
+                        cvss=cvss, confidence="HIGH", confidence_score=85,
+                        validation_steps=["status_200", "content_validated", "soft_404_checked"]
                     )
                     if added:
                         self.ui.find(severity, title, url)
@@ -87,7 +160,7 @@ class NucleiModule(BaseModule):
             except Exception:
                 continue
 
-        self.ui.ok(f"Nuclei checks complete — {found} finding(s)")
+        self.ui.ok(f"Nuclei built-in checks complete — {found} finding(s)")
 
 
 # ─── IDOR Module ───────────────────────────────────────────────────────────────

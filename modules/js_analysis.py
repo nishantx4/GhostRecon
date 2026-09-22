@@ -57,12 +57,46 @@ class JSModule(BaseModule):
 
         self.ui.info(f"Analyzing {len(js_files)} JavaScript files...")
         found_secrets = []
+        new_endpoints = set()
+        
+        # LinkFinder Regex for extracting endpoints
+        link_regex = re.compile(
+            r"""
+            (?:"|')                               # Start newline delimiter
+            (
+                ((?:[a-zA-Z]{1,10}://|//)         # Match a scheme [a-Z]*1-10 or //
+                [^"'/]{1,}\.                      # Match a domainname (any character + dot)
+                [a-zA-Z]{2,}[^"']{0,})            # The domainextension and/or path
+                |
+                ((?:/|\.\./|\./)                  # Start with /,../,./
+                [^"'><,;| *()(%%$^/\\\[\]]        # Next character can't be...
+                [^"'><,;|()]{1,})                 # Rest of the characters can't be
+                |
+                ([a-zA-Z0-9_\-/]{1,}/             # Relative endpoint with /
+                [a-zA-Z0-9_\-/]{1,}               # Resource name
+                \.(?:[a-zA-Z]{1,4}|action)        # Rest + extension (length 1-4 or action)
+                (?:[\?|#][^"|']{0,}|))            # ? or # mark with parameters
+                |
+                ([a-zA-Z0-9_\-/]{1,}/             # REST API (no extension)
+                [a-zA-Z0-9_\-/]{3,}               # Proper REST endpoints usually have 3+ chars
+                (?:[\?|#][^"|']{0,}|))            # ? or # mark with parameters
+                |
+                ([a-zA-Z0-9_\-]{1,}               # filename
+                \.(?:php|asp|aspx|jsp|json|       # . + extension
+                     action|html|js|txt|xml)
+                (?:[\?|#][^"|']{0,}|))            # ? or # mark with parameters
+            )
+            (?:"|')                               # End newline delimiter
+            """, re.VERBOSE
+        )
 
         for js_url in js_files[:30]:  # Cap at 30 files
             resp = self._get(js_url)
             if not resp or resp.status_code != 200:
                 continue
             content = resp.text
+            
+            # Secret Extraction
             for pattern, secret_type in self.SECRET_PATTERNS:
                 for match in re.finditer(pattern, content, re.I):
                     val = match.group(1) if len(match.groups()) > 0 else match.group(0)
@@ -72,6 +106,15 @@ class JSModule(BaseModule):
                     if any(s in val.lower() for s in skip):
                         continue
                     found_secrets.append((js_url, secret_type, val[:40]))
+                    
+            # Endpoint Extraction (LinkFinder)
+            for match in re.finditer(link_regex, content):
+                ep = match.group(1).strip()
+                if ep and not ep.startswith(('text/html', 'application/')):
+                    # Reconstruct full URL if relative
+                    if not ep.startswith('http'):
+                        ep = urllib.parse.urljoin(self.base_url, ep)
+                    new_endpoints.add(ep)
 
             # ── AI deep analysis of this JS file ────────────────────
             if self.ai and self.ai.enabled and len(content) > 200:
@@ -82,9 +125,23 @@ class JSModule(BaseModule):
                         self.ui.raw(f"    {line}")
                     self.ui.blank()
 
+        # Update global endpoints with JS discovered ones
+        if new_endpoints:
+            self.ui.info(f"LinkFinder regex extracted {len(new_endpoints)} endpoints from JS")
+            existing = self.ctx.setdefault("endpoints", [])
+            for ep in new_endpoints:
+                if ep not in existing:
+                    existing.append(ep)
+
         self.ctx["js_secrets"] = found_secrets
         if found_secrets:
             for url, stype, val in found_secrets:
+                
+                # Check FP
+                if hasattr(self, 'validator') and self.validator:
+                     if self.validator.is_entropy_low(val):
+                          continue
+                          
                 self.db.add(
                     title=f"Secret Exposed in JavaScript: {stype}",
                     severity="high",
@@ -92,7 +149,10 @@ class JSModule(BaseModule):
                     module=self.NAME,
                     description=f"A {stype} was found hardcoded in client-side JavaScript: {val}...",
                     remediation="Remove all secrets from client-side code. Use server-side environment variables.",
-                    cvss="7.5", confidence="medium",
+                    cvss="7.5", 
+                    confidence="HIGH",
+                    confidence_score=85,
+                    validation_steps=["regex_match", "entropy_check"]
                 )
                 self.ui.find("high", f"JS Secret: {stype}", url)
         else:

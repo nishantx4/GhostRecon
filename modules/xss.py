@@ -368,7 +368,13 @@ class XSSModule(BaseModule):
         if not body:
             return False
 
-        # Check for unencoded payload presence
+        # Attempt to use Validator's DOM analysis
+        from core.validator import Validator
+        validator = Validator()
+        if validator.validate_xss_reflection(body, payload):
+            return True
+
+        # Fallback to stringent string matching if DOM check fails but might be true
         # Key executable fragments that would trigger JS
         exec_markers = [
             "onerror=alert", "onload=alert", "onmouseover=alert",
@@ -377,21 +383,23 @@ class XSSModule(BaseModule):
             "onerror=alert(1)", "onload=alert(1)",
         ]
         body_lower = body.lower()
-        for marker in exec_markers:
-            if marker.lower() in body_lower:
-                # Make sure it's not HTML-encoded (&lt; etc.)
-                encoded = marker.replace("<", "&lt;").replace(">", "&gt;").lower()
-                if encoded not in body_lower:
-                    return True
+        payload_lower = payload.lower()
 
-        # Direct unencoded payload match
-        if payload in body and "&lt;" not in body[body.find(payload)-5:body.find(payload)+5]:
-            # Verify it's not sitting inside a comment
-            idx = body.find(payload)
-            comment_open  = body.rfind("<!--", 0, idx)
-            comment_close = body.rfind("-->", 0, idx)
-            if comment_open <= comment_close:
-                return True
+        # Is the payload directly in the text?
+        if payload_lower not in body_lower:
+            return False
+
+        # Make sure it's not HTML-encoded (&lt; etc.) in the immediate vicinity
+        # If the page encoded < as &lt;, then payload won't match literally anyway.
+        # But if the payload itself didn't have <, we check markers
+        
+        # Check if the payload is just sitting as text (e.g., inside a <p> or <textarea>)
+        # This is where DOM parsing is superior. As a fallback, we check if <script> or event handlers were preserved.
+        if "<script" in payload_lower and "<script" in body_lower:
+             return True
+             
+        if "on" in payload_lower and "=" in payload_lower and any(marker.lower() in body_lower for marker in exec_markers):
+             return True
 
         return False
 

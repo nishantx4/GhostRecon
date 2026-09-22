@@ -77,24 +77,63 @@ class HeadersModule(BaseModule):
                 )
 
         # Check for insecure cookies
-        if "set-cookie" in headers:
-            cookie = headers["set-cookie"]
-            if "httponly" not in cookie.lower():
+        # Need to properly parse Set-Cookie headers as there could be multiple
+        if hasattr(resp, 'raw') and hasattr(resp.raw, 'headers') and hasattr(resp.raw.headers, 'getlist'):
+            raw_cookies = resp.raw.headers.getlist('Set-Cookie')
+        elif 'Set-Cookie' in resp.headers:
+             # Requests merges them into one string if we just use resp.headers (bad for parsing)
+             # Let's iterate through the session cookies if we can
+             raw_cookies = [cookie.name + "=" + cookie.value for cookie in resp.cookies] if resp.cookies else []
+             if not raw_cookies:
+                  # Fallback
+                  raw_cookies = [resp.headers['Set-Cookie']]
+        else:
+             raw_cookies = []
+
+        from core.validator import Validator
+        validator = Validator()
+
+        for cookie_str in raw_cookies:
+            # Basic parsing
+            parts = cookie_str.split(";")
+            if not parts:
+                continue
+                
+            cookie_pair = parts[0].strip()
+            if "=" not in cookie_pair:
+                continue
+                
+            cookie_name = cookie_pair.split("=")[0].strip()
+            
+            # Is this a session cookie?
+            if not validator.validate_cookie_is_session(cookie_name):
+                 continue
+
+            cookie_lower = cookie_str.lower()
+            
+            if "httponly" not in cookie_lower:
                 self.db.add(
-                    title="Session Cookie Missing HttpOnly Flag",
-                    severity="medium", url=self.base_url, module=self.NAME,
-                    description="Session cookie lacks HttpOnly flag — accessible to JavaScript (XSS theft).",
+                    title=f"Session Cookie Missing HttpOnly Flag ({cookie_name})",
+                    severity="high", url=self.base_url, module=self.NAME,
+                    description=f"Session cookie '{cookie_name}' lacks HttpOnly flag — accessible to JavaScript (XSS theft).",
                     remediation="Set HttpOnly flag on all session cookies.",
-                    cvss="5.4", confidence="high",
+                    cvss="5.4", 
+                    confidence="CONFIRMED",
+                    confidence_score=95,
+                    validation_steps=["is_session_cookie", "httponly_missing"]
                 )
-                self.ui.find("medium", "Cookie missing HttpOnly", self.base_url)
-            if "secure" not in cookie.lower():
+                self.ui.find("high", f"Cookie missing HttpOnly: {cookie_name}", self.base_url)
+                
+            if "secure" not in cookie_lower and self.base_url.startswith("https"):
                 self.db.add(
-                    title="Session Cookie Missing Secure Flag",
-                    severity="medium", url=self.base_url, module=self.NAME,
-                    description="Session cookie lacks Secure flag — transmitted over HTTP.",
+                    title=f"Session Cookie Missing Secure Flag ({cookie_name})",
+                    severity="high", url=self.base_url, module=self.NAME,
+                    description=f"Session cookie '{cookie_name}' lacks Secure flag — transmitted over HTTP.",
                     remediation="Set Secure flag on all session cookies.",
-                    cvss="5.4", confidence="high",
+                    cvss="5.4", 
+                    confidence="CONFIRMED",
+                    confidence_score=95,
+                    validation_steps=["is_session_cookie", "secure_missing"]
                 )
 
         # ── AI: assess combined header risk ──────────────────────────────

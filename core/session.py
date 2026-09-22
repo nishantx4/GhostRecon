@@ -9,36 +9,86 @@ from datetime import datetime
 from core.ui import UI, Colors
 from core.findings import FindingsDB
 from core.ai_engine import AIEngine
+from core.baseline import BaselineProfiler, BaselineProfile
+from core.tool_runner import ExternalToolRunner
+
+# Phase 1: Recon
 from modules.recon      import ReconModule
+from modules.cms_scanner import CMSScannerModule
+# Phase 2: Configuration & Identity
 from modules.headers    import HeadersModule
-from modules.js_analysis import JSModule
-from modules.params     import ParamModule
-from modules.nuclei_sim import NucleiModule
-from modules.xss        import XSSModule
-from modules.idor       import IDORModule
-from modules.sqli       import SQLiModule
-from modules.graphql    import GraphQLModule
-from modules.smuggling  import SmugglingModule
-from modules.cors       import CORSModule
-from modules.ssrf       import SSRFModule
+from modules.subdomain_takeover import SubdomainTakeoverModule
 from modules.secrets    import SecretsModule
+# Phase 3: Authentication & Authorization
+from modules.jwt        import JWTModule
+from modules.broken_auth import BrokenAuthModule
+from modules.oauth      import OAuthModule
+from modules.idor       import IDORModule
+# Phase 4: Data & Input Validation
+from modules.params     import ParamModule
+from modules.js_analysis import JSModule
+from modules.file_upload import FileUploadModule
+from modules.mass_assignment import MassAssignmentModule
+# Phase 5: Injection & Exploitation
+from modules.sqli       import SQLiModule
+from modules.nosql      import NoSQLModule
+from modules.ssti       import SSTIModule
+from modules.xss        import XSSModule
+from modules.xxe        import XXEModule
+from modules.crlf       import CRLFModule
+from modules.ssrf       import SSRFModule
+from modules.deserialization import DeserializationModule
+from modules.prototype_pollution import PrototypePollutionModule
+# Phase 6: Client-Side & Logic
+from modules.cors       import CORSModule
+from modules.csrf       import CSRFModule
+from modules.clickjacking import ClickjackingModule
+from modules.open_redirect import OpenRedirectModule
+from modules.websocket  import WebSocketModule
+# Phase 7: Advanced
+from modules.cache_poisoning import CachePoisoningModule
+from modules.smuggling  import SmugglingModule
+from modules.rate_limit import RateLimitModule
+from modules.graphql    import GraphQLModule
+# External Scanners
+from modules.nuclei_sim import NucleiModule
+# Reporting
 from modules.reporter   import ReportModule
 
 
 MODULE_MAP = {
     'recon':     ReconModule,
+    'cms':       CMSScannerModule,
     'headers':   HeadersModule,
-    'js':        JSModule,
-    'params':    ParamModule,
-    'nuclei':    NucleiModule,
-    'xss':       XSSModule,
-    'idor':      IDORModule,
-    'sqli':      SQLiModule,
-    'graphql':   GraphQLModule,
-    'smuggling': SmugglingModule,
-    'cors':      CORSModule,
-    'ssrf':      SSRFModule,
+    'sub_take':  SubdomainTakeoverModule,
     'secrets':   SecretsModule,
+    'jwt':       JWTModule,
+    'broken_auth': BrokenAuthModule,
+    'oauth':     OAuthModule,
+    'idor':      IDORModule,
+    'params':    ParamModule,
+    'js':        JSModule,
+    'upload':    FileUploadModule,
+    'mass_assign': MassAssignmentModule,
+    'sqli':      SQLiModule,
+    'nosql':     NoSQLModule,
+    'ssti':      SSTIModule,
+    'xss':       XSSModule,
+    'xxe':       XXEModule,
+    'crlf':      CRLFModule,
+    'ssrf':      SSRFModule,
+    'desync':    DeserializationModule,
+    'proto_poll': PrototypePollutionModule,
+    'cors':      CORSModule,
+    'csrf':      CSRFModule,
+    'clickjack': ClickjackingModule,
+    'redirect':  OpenRedirectModule,
+    'ws':        WebSocketModule,
+    'cache':     CachePoisoningModule,
+    'smuggling': SmugglingModule,
+    'rate_limit': RateLimitModule,
+    'graphql':   GraphQLModule,
+    'nuclei':    NucleiModule,
     'report':    ReportModule,
 }
 
@@ -46,10 +96,12 @@ MODULE_MAP = {
 class ScanSession:
     def __init__(self, target, api_key=None, modules=None, scope=None,
                  output_dir='./ghostrecon_output', output_file=None,
-                 threads=10, timeout=10, delay=0.5, verbose=False, ui=None):
+                 threads=10, timeout=10, delay=0.5, verbose=False, ui=None,
+                 event_callback=None):
         self.target     = self._normalize_target(target)
         self.api_key    = api_key
-        self.modules    = modules or ['recon','headers','js','params','nuclei','xss','idor','cors','ssrf','report']
+        # Default profile: full scan
+        self.modules    = modules or list(MODULE_MAP.keys())
         self.scope      = scope
         self.output_dir = output_dir
         self.output_file = output_file
@@ -59,9 +111,11 @@ class ScanSession:
         self.verbose    = verbose
         self.ui         = ui or UI()
         self.start_time = None
-        self.db         = FindingsDB()
-        self.ai         = AIEngine(api_key=api_key, ui=self.ui)
+        self.event_callback = event_callback # For TUI updates
+        self.db         = FindingsDB(event_callback=self.event_callback)
         self.context    = {}  # shared data between modules (subdomains, endpoints, etc.)
+        self.ai         = AIEngine(api_key=api_key, ui=self.ui)
+        self.tool_runner = ExternalToolRunner(self.ui)
 
     def _normalize_target(self, t):
         t = t.strip().lower()
@@ -69,23 +123,42 @@ class ScanSession:
             if t.startswith(prefix):
                 t = t[len(prefix):]
         return t.rstrip('/')
+        
+    def _emit(self, event_type, data):
+        """Emit an event to the TUI if event_callback is provided."""
+        if self.event_callback:
+            try:
+                self.event_callback(event_type, data)
+            except Exception:
+                pass
 
     def run(self):
         self.start_time = time.time()
         os.makedirs(self.output_dir, exist_ok=True)
+        
+        self._emit("scan_started", {"target": self.target, "modules": self.modules})
 
         self.ui.section(f"Starting GhostRecon against: {self.target}")
-        self.ui.info(f"Modules: {', '.join(self.modules)}")
-        self.ui.info(f"Scope: {self.scope or 'Not specified — treat all discovered assets as in-scope'}")
+        self.ui.info(f"Modules: {len(self.modules)} enabled")
         self.ui.info(f"AI Analysis: {'Enabled — NVIDIA NIM (qwen3.5-122b)' if self.api_key else 'Local engine (no API key set)'}")
-        self.ui.info(f"Output dir: {self.output_dir}")
         self.ui.blank()
+        
+        # ── Target Profiling (Baseline) ──
+        self._emit("phase_started", {"name": "Target Profiling"})
+        self.ui.section("Phase 0: Target Profiling & Fingerprinting")
+        baseline = BaselineProfiler(self.target, timeout=self.timeout, ui=self.ui)
+        profile = baseline.profile()
+        self.context['baseline_profile'] = profile
+        self._emit("profiling_complete", profile)
 
         # ── Run modules in order ──
         for mod_name in self.modules:
             if mod_name not in MODULE_MAP:
                 self.ui.warn(f"Unknown module '{mod_name}' — skipping")
                 continue
+                
+            self._emit("module_started", {"module": mod_name})
+            
             try:
                 ModClass = MODULE_MAP[mod_name]
                 mod = ModClass(
@@ -100,7 +173,13 @@ class ScanSession:
                     ai=self.ai,
                     output_dir=self.output_dir,
                 )
+                
+                # Pass event callback down if module supports it
+                if hasattr(mod, 'event_callback'):
+                    mod.event_callback = self.event_callback
+                    
                 mod.run()
+                
             except KeyboardInterrupt:
                 raise
             except Exception as e:
@@ -108,7 +187,10 @@ class ScanSession:
                 if self.verbose:
                     import traceback
                     traceback.print_exc()
+                self._emit("module_failed", {"module": mod_name, "error": str(e)})
                 continue
+                
+            self._emit("module_completed", {"module": mod_name})
 
         # ── AI Chain Analysis ──
         self._run_ai_chain_analysis()
@@ -116,11 +198,13 @@ class ScanSession:
         # ── Final summary ──
         self._print_summary()
         self._save_results()
+        self._emit("scan_completed", {"duration": time.time() - self.start_time, "findings": len(self.db.findings)})
 
     def _run_ai_chain_analysis(self):
         if not self.db.findings:
             return
         self.ui.section("AI Vulnerability Chain Analysis")
+        self._emit("phase_started", {"name": "AI Chain Analysis"})
         self.ai.analyze_chains(self.target, self.db.findings)
 
     def _print_summary(self):

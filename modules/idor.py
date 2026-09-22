@@ -54,28 +54,51 @@ class IDORModule(BaseModule):
             try:
                 resp = s.get(url, timeout=self.timeout)
                 if resp.status_code == 200 and len(resp.text) > 50:
-                    # ── AI-enhanced check: let AI decide if response leaks private data
-                    ai_verdict = None
-                    if self.ai and self.ai.enabled:
-                        ai_verdict = self.ai.analyze_idor_response(
-                            url, resp.text, url.split('/')[-1]
-                        )
+                    
+                    # FP Check: If the page is just the default homepage/soft-404, skip
+                    baseline = self.ctx.get('baseline_profile')
+                    if baseline and baseline.matches_soft_404(resp.text, resp.status_code):
+                        continue
 
-                    # Fallback: keyword-based check
-                    data_indicators = ["email", "username", "user_id", "account",
-                                       "password", "phone", "address", "token"]
+                    # Fallback: strict keyword-based check (require multiple to avoid FP like "email us" in footer)
+                    data_indicators = ["email", "username", "user_id", "account_id", 
+                                       "password_hash", "phone_number", "billing_address", "auth_token"]
+                    
+                    # Ignore common public site words
+                    ignore_patterns = ["contact email", "email address", "enter your email", "email us at"]
                     resp_lower = resp.text.lower()
-                    keyword_hit = any(ind in resp_lower for ind in data_indicators)
-
+                    
+                    for ignore in ignore_patterns:
+                        resp_lower = resp_lower.replace(ignore, "")
+                        
+                    keyword_matches = sum(1 for ind in data_indicators if ind in resp_lower)
+                    
                     is_idor = False
-                    confidence = "medium"
-                    reason = "Response contains user data keywords"
+                    confidence = "MEDIUM"
+                    confidence_score = 60
+                    reason = f"Response contains {keyword_matches} user data keywords"
 
-                    if ai_verdict:
-                        is_idor    = ai_verdict.get("is_idor", False)
-                        confidence = ai_verdict.get("confidence", "medium")
-                        reason     = ai_verdict.get("reason", reason)
-                    elif keyword_hit:
+                    # ── Validator AI check if available
+                    if self.ai and self.ai.enabled:
+                        ai_verdict = self.ai._call(
+                            system="You are a security auditor. Assess if this HTTP response indicates an Insecure Direct Object Reference (IDOR) leaking private user data. Return JSON: {\"is_idor\": true/false, \"confidence\": 0.0-1.0, \"reason\": \"text\"}",
+                            user=f"URL: {url}\nResponse snippet:\n{resp.text[:1000]}\nDoes this look like private user data leaked via IDOR?",
+                            max_tokens=200
+                        )
+                        if ai_verdict:
+                            try:
+                                import json
+                                start = ai_verdict.find("{")
+                                end = ai_verdict.rfind("}") + 1
+                                if start != -1 and end > start:
+                                    parsed = json.loads(ai_verdict[start:end])
+                                    is_idor = parsed.get("is_idor", False)
+                                    confidence_score = int(parsed.get("confidence", 0.6) * 100)
+                                    confidence = "HIGH" if confidence_score > 80 else "MEDIUM"
+                                    reason = parsed.get("reason", reason)
+                            except Exception:
+                                pass
+                    elif keyword_matches >= 2:
                         is_idor = True
 
                     if is_idor:
@@ -84,7 +107,7 @@ class IDORModule(BaseModule):
                             severity="high", url=url, module=self.NAME,
                             description=(
                                 f"Endpoint {url} returned 200 OK with likely user data. "
-                                f"AI assessment: {reason}. "
+                                f"Assessment: {reason}. "
                                 "Verify with two accounts: if Account B can read Account A's "
                                 "data by changing the ID, this is confirmed IDOR."
                             ),
@@ -92,7 +115,10 @@ class IDORModule(BaseModule):
                                 "Implement server-side authorization. Verify requesting user "
                                 "owns the object. Use non-sequential UUIDs."
                             ),
-                            cvss="8.1", confidence=confidence,
+                            cvss="8.1", 
+                            confidence=confidence,
+                            confidence_score=confidence_score,
+                            validation_steps=["status_200", "keywords_matched_or_ai_verified"]
                         )
                         self.ui.find("high", f"Potential IDOR — {reason}", url)
                         found += 1

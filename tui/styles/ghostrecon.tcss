@@ -1,0 +1,103 @@
+Screen {
+    background: #0d1117;
+}
+
+Header {
+    background: #4f46e5;
+    color: white;
+    text-style: bold;
+}
+
+Footer {
+    background: #1e1e2e;
+    color: #a6accd;
+}
+
+.title {
+    content-align: center middle;
+    text-style: bold;
+    color: #38bdf8;
+    padding: 1 0;
+}
+
+/* Dashboard Layout */
+DashboardScreen {
+    layout: grid;
+    grid-size: 4 3;
+    grid-rows: 1fr 12 3;
+    grid-columns: 1fr 1fr 1fr 1fr;
+    grid-gutter: 1 2;
+    padding: 1 2;
+}
+
+#progress_panel {
+    row-span: 1;
+    column-span: 1;
+    border: round #4f46e5;
+    background: #111827;
+    padding: 1;
+}
+
+#tool_execution_panel {
+    row-span: 1;
+    column-span: 3;
+    border: round #38bdf8;
+    background: #111827;
+    padding: 0 1;
+}
+
+#finding_panel {
+    row-span: 1;
+    column-span: 4;
+    border: round #ef4444;
+    background: #111827;
+    padding: 1;
+}
+
+#severity_chart {
+    row-span: 1;
+    column-span: 4;
+    border: round #f59e0b;
+    background: #111827;
+    padding: 1;
+    content-align: center middle;
+}
+
+/* Widget specifics */
+.panel-title {
+    text-style: bold;
+    color: #e2e8f0;
+    margin-bottom: 1;
+    content-align: center middle;
+    width: 100%;
+}
+
+.module-pending { color: #64748b; }
+.module-running { color: #f59e0b; text-style: bold; }
+.module-complete { color: #10b981; }
+.module-failed { color: #ef4444; }
+
+.finding-item {
+    padding: 1;
+    border: solid #ef4444;
+    background: #1e293b;
+    margin-bottom: 1;
+}
+
+Collapsible {
+    border: solid #38bdf8;
+    background: #1e293b;
+    margin: 1 0;
+}
+
+Collapsible > .collapsible--title {
+    color: #e2e8f0;
+    text-style: bold;
+}
+
+RichLog {
+    background: #0f172a;
+    color: #a5b4fc;
+    padding: 1;
+    height: 100%;
+}

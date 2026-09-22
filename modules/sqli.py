@@ -392,23 +392,26 @@ class SQLiModule(BaseModule):
                 if resp_true.status_code != resp_false.status_code:
                     continue
 
-                # Condition 2: true response resembles baseline
-                baseline_diff = abs(len_true - baseline_len)
-                condition_diff = abs(len_true - len_false)
-
-                # Require meaningful difference (>50 chars or >10% of page)
-                threshold = max(50, baseline_len * 0.05)
-                if condition_diff < threshold:
-                    continue
-
-                # Condition 3: true payload response closer to baseline than false
-                false_diff = abs(len_false - baseline_len)
-                if len_true == len_false:
-                    continue
-
-                if self.verbose:
-                    self.ui.warn(f"Boolean SQLi candidate: {url} param={param} "
-                                 f"true_len={len_true} false_len={len_false} diff={condition_diff}")
+                # Instead of just raw lengths, let's use the core Validator differential analysis if available
+                from core.validator import Validator
+                validator = Validator()
+                
+                # Check 1: True response should be highly similar to Baseline response
+                # Check 2: False response should be significantly different from Baseline
+                
+                # We can approximate similarity by length differences if hash isn't available
+                diff_true_base = abs(len_true - baseline_len)
+                diff_false_base = abs(len_false - baseline_len)
+                diff_true_false = abs(len_true - len_false)
+                
+                # Threshold for dynamic content variance (e.g. CSRF tokens changing)
+                variance_threshold = max(20, baseline_len * 0.02)
+                
+                # Condition: True matches Base, False diverges from Base
+                if diff_true_base <= variance_threshold and diff_false_base > variance_threshold * 2 and diff_true_false > variance_threshold * 2:
+                    if self.verbose:
+                        self.ui.warn(f"Boolean SQLi candidate: {url} param={param} "
+                                     f"true_len={len_true} false_len={len_false} base_len={baseline_len}")
 
                 return {
                     "payload": true_payload,

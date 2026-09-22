@@ -3,6 +3,7 @@ SecretsModule — GhostRecon module.
 Probes for exposed sensitive files with multi-stage validation to prevent false positives.
 """
 import re
+import math
 import time
 import urllib.parse
 
@@ -172,4 +173,4 @@ class SecretsModule(BaseModule):
         return False
 
 
-# ─── Reporter Module ───────────────────────────────────────────────────────────
+# --- Reporter Module --------------------------------------------------------

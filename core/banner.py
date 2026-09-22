@@ -9,7 +9,7 @@ BANNER = r"""
   \_____|_| |_|\___/|___/\__|_|  \_\___|\___\___/|_| |_|
 """
 
-SUBTITLE = "  AI Bug Bounty Hunter — v2.0  |  Powered by NVIDIA NIM"
+SUBTITLE = "  AI Bug Bounty Hunter — v3.0  |  Powered by NVIDIA NIM"
 AUTHOR   = "  Made by: Nishant 👻"
 TAGLINE  = "  Your personal bug bounty hunting companion"
 

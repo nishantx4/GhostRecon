@@ -76,11 +76,7 @@ class CORSModule(BaseModule):
                     self.db.add(
                         title=f"CORS Misconfiguration — Reflected Origin: {acao}",
                         severity=severity, url=self.base_url, module=self.NAME,
-                        description=(
-                            f"The server reflects the attacker-controlled origin '{origin}' in "
-                            f"Access-Control-Allow-Origin. With credentials: {acac}. "
-                            "This allows cross-origin requests to read authenticated responses."
-                        ),
+                        description=description,
                         remediation=(
                             "Whitelist only trusted origins. Never reflect the Origin header blindly. "
                             "Do not combine Access-Control-Allow-Credentials: true with wildcard origins."

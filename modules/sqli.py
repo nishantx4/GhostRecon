@@ -360,6 +360,15 @@ class SQLiModule(BaseModule):
                     if base_db:
                         continue  # Error in baseline too — not injected
 
+                    # Optional AI augmentation: confirm DB type / weed out FPs.
+                    if self.ai and self.ai.enabled:
+                        try:
+                            verdict = self.ai.analyze_sqli_error(url, param, resp.text)
+                            if verdict:
+                                self.ui.ai(verdict.split("\n")[0][:200])
+                        except Exception:
+                            pass
+
                     if self.verbose:
                         self.ui.warn(f"Error-based SQLi: {url} param={param} DB={db_type}")
                     return {
@@ -424,8 +433,6 @@ class SQLiModule(BaseModule):
                         f"Difference: {condition_diff} chars"
                     )
                 }
-
-                time.sleep(self.delay)
             except Exception:
                 continue
         return None

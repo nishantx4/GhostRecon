@@ -152,6 +152,8 @@ class ScanSession:
         self._emit("profiling_complete", profile)
 
         # ── Run modules in order ──
+        total_mods = len([m for m in self.modules if m in MODULE_MAP and m != 'report'])
+        done = 0
         for mod_name in self.modules:
             if mod_name not in MODULE_MAP:
                 self.ui.warn(f"Unknown module '{mod_name}' — skipping")
@@ -218,8 +220,19 @@ class ScanSession:
         self.ui.blank()
 
         counts = self.db.severity_counts()
-        rows = [(sev.upper(), counts.get(sev, 0)) for sev in ['critical','high','medium','low','info']]
-        self.ui.table(['Severity', 'Count'], rows, col_widths=[12, 8])
+        self.ui.sev_bar(counts)
+        self.ui.blank()
+
+        # Weighted risk score (0-100) to give an at-a-glance posture.
+        weights = {'critical': 40, 'high': 20, 'medium': 8, 'low': 3, 'info': 0}
+        raw = sum(weights.get(s, 0) * counts.get(s, 0) for s in weights)
+        risk = min(100, raw)
+        grade = ('CRITICAL' if risk >= 80 else 'HIGH' if risk >= 50 else
+                 'MODERATE' if risk >= 20 else 'LOW' if risk > 0 else 'CLEAN')
+        self.ui.panel("Risk Posture", [
+            f"Risk score : {risk}/100  ({grade})",
+            f"Findings   : {len(self.db.findings)} total",
+        ])
         self.ui.blank()
 
         # Top findings

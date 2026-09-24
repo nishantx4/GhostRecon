@@ -28,7 +28,12 @@ class OpenRedirectModule(BaseModule):
         "https://ghostrecon-redirect-test.example.com",
         "/\\ghostrecon-redirect-test.example.com",
         "//ghostrecon-redirect-test.example.com%2f%2f",
-        "https://ghostrecon-redirect-test.example.com@{target}",
+        # {target} as fake userinfo, canary as the real authority — a naive
+        # "starts with / contains our domain" whitelist check passes this,
+        # but the browser navigates to the canary. (Previously had this
+        # backwards — canary-as-userinfo/target-as-host — which resolves to
+        # the *legitimate* target and can never trigger a canary match.)
+        "https://{target}@ghostrecon-redirect-test.example.com",
         "////ghostrecon-redirect-test.example.com",
         "https:ghostrecon-redirect-test.example.com",
     ]
@@ -93,5 +98,66 @@ class OpenRedirectModule(BaseModule):
             if found > 10:
                 break
 
+        found += self._test_json_bodies(s, canary_domain, found)
+
         if found == 0:
             self.ui.info("No open redirect vulnerabilities detected.")
+
+    def _test_json_bodies(self, s, canary_domain, already_found):
+        """
+        OAuth-style redirect_uri / callback params are commonly delivered as
+        JSON body properties on API-first targets, not query strings — check
+        those too using ctx['api_endpoints'] from an OpenAPI/Swagger spec.
+        """
+        found = 0
+        auth_headers = self.ctx.get("auth_headers", {})
+        redirect_hints = [p.lower() for p in self.REDIRECT_PARAMS]
+
+        for ep in self.ctx.get("api_endpoints", []):
+            method = ep.get("method", "POST")
+            if method not in ("POST", "PUT", "PATCH"):
+                continue
+            json_props = ep.get("json_props", [])
+            candidates = [p for p in json_props if any(h in p.lower() for h in redirect_hints)]
+            if not candidates:
+                continue
+
+            headers = dict(auth_headers)
+            for name, example in ep.get("header_params", []):
+                if example:
+                    headers[name] = str(example)
+
+            for prop in candidates:
+                for canary_url in self.CANARY_URLS:
+                    test_url = canary_url.replace("{target}", self.target)
+                    body = {p: "test" for p in json_props if p != prop}
+                    body[prop] = test_url
+                    try:
+                        resp = s.request(method, ep["url"], json=body, timeout=self.timeout,
+                                          headers=headers, allow_redirects=False)
+                        location = resp.headers.get("Location", "")
+                        if canary_domain in location:
+                            self.db.add(
+                                title=f"Open Redirect via '{prop}' JSON Body Property",
+                                severity="medium", url=ep["url"], module=self.NAME,
+                                description=(
+                                    f"JSON body property '{prop}' allows unvalidated redirects. "
+                                    f"Injected URL '{test_url}' caused redirect to: {location}. "
+                                    "This enables phishing, OAuth token theft, and SSO bypass attacks."
+                                ),
+                                remediation=(
+                                    "Validate redirect targets against a whitelist of allowed domains."
+                                ),
+                                cvss="6.1", confidence="CONFIRMED", confidence_score=95,
+                                validation_steps=["canary_in_location_header"],
+                                evidence=[f"Location: {location}", f"Payload: {test_url}"],
+                            )
+                            self.ui.find("medium", f"Open Redirect via '{prop}' (JSON)", ep["url"])
+                            found += 1
+                            break
+                        time.sleep(self.delay)
+                    except Exception:
+                        continue
+                if found + already_found > 10:
+                    return found
+        return found

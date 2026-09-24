@@ -62,7 +62,12 @@ class ReportModule(BaseModule):
             if f.get("cvss"):
                 md += f"**CVSS Score:** {f['cvss']}  \n"
             md += f"**Module:** {f['module']}  \n"
-            md += f"**Confidence:** {f.get('confidence','N/A')}  \n\n"
+            conf_label = f.get('confidence', 'N/A')
+            conf_score = f.get('confidence_score')
+            md += f"**Confidence:** {conf_label}" + (f" ({conf_score}/100)" if conf_score is not None else "") + "  \n"
+            if f.get("validation_steps"):
+                md += f"**Validation:** {', '.join(f['validation_steps'])}  \n"
+            md += "\n"
             md += f"**Description:**  \n{f['description']}\n\n"
             if f.get("evidence"):
                 md += "**Evidence:**\n"

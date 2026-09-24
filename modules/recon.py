@@ -3,6 +3,7 @@ ReconModule — crawls target, extracts endpoints, parameters, and forms.
 Feeds XSS, SQLi, and other modules with real data.
 """
 import re
+import json
 import time
 import urllib.parse
 import ipaddress
@@ -14,8 +15,30 @@ try:
 except ImportError:
     requests = None
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 
 from modules import BaseModule
+
+
+# Common locations for OpenAPI/Swagger specs — hit before assuming an API
+# has no discoverable surface. A pure JSON/XML REST API (no HTML forms, no
+# crawlable links) is otherwise completely invisible to every injection
+# module, since they only ever learn about params via HTML forms/query
+# strings/mined JS.
+API_SPEC_PATHS = [
+    "/openapi.json", "/openapi.yaml", "/openapi.yml",
+    "/swagger.json", "/swagger.yaml",
+    "/v1/openapi.json", "/v2/api-docs", "/v3/api-docs",
+    "/api-docs", "/api-docs.json", "/api-docs.yaml",
+    "/api/openapi.json", "/api/swagger.json",
+    "/api/v1/openapi.json", "/api/v1/swagger.json",
+    "/swagger/v1/swagger.json",
+    "/.well-known/openapi.yaml",
+]
 
 
 class ReconModule(BaseModule):
@@ -83,17 +106,24 @@ class ReconModule(BaseModule):
         # Mine JavaScript for hidden endpoints and parameter names
         self._mine_javascript()
 
+        # Discover & parse an OpenAPI/Swagger spec — the only reliable way to
+        # find injectable params on a pure JSON/XML REST API with no HTML forms
+        self._discover_api_spec()
+
         # Always seed endpoints with known-injectable probe paths
         # so XSS/SQLi have targets even if the crawl fails
         self._probe_common_paths()
 
         # Update context
         ep_list = list(self.endpoints)
-        self.ctx["endpoints"] = ep_list
-        self.ctx["forms"]     = self.forms
+        self.ctx["forms"] = self.forms
         self.ctx.setdefault("subdomains", [self.target])
 
         # ── AI: prioritize endpoints for deeper testing ───────────────
+        # ctx["endpoints"] is populated with the AI-ranked order (falling back
+        # to crawl order when AI is disabled) so every downstream module that
+        # reads ctx["endpoints"] scans the highest-value targets first instead
+        # of the AI's ranking being computed and then discarded.
         if self.ai and self.ai.enabled and ep_list:
             ep_list = self.ai.prioritize_endpoints(ep_list)
             self.ctx["ai_priority_endpoints"] = ep_list[:20]
@@ -102,6 +132,7 @@ class ReconModule(BaseModule):
                 self.ui.bullet(ep)
             self.ui.blank()
 
+        self.ctx["endpoints"] = ep_list
         self.ui.ok(f"Recon complete — {len(ep_list)} endpoints, {len(self.forms)} forms discovered")
 
     def _crawl(self, url, depth=2):
@@ -389,6 +420,155 @@ class ReconModule(BaseModule):
         if added > 0:
             self.ui.ok(f"Discovered {added} historical URLs")
             
+    def _discover_api_spec(self):
+        """
+        Probe common OpenAPI/Swagger spec locations. If one is found, parse it
+        into ctx['api_endpoints'] (structured method/path/query/header/body
+        params — including JSON and XML request bodies) and ctx['auth_headers']
+        (example header values, e.g. an API token, needed to reach past auth
+        on endpoints that require one). Injection modules (sqli.py, etc.) read
+        ctx['api_endpoints'] directly since these params are never reachable
+        via crawling alone.
+        """
+        for path in API_SPEC_PATHS:
+            url = urllib.parse.urljoin(self.base_url + "/", path.lstrip("/"))
+            try:
+                resp = self.session.get(url, timeout=self.timeout)
+            except Exception:
+                continue
+            if resp.status_code != 200 or len(resp.text.strip()) < 20:
+                continue
+
+            spec = self._parse_spec_body(resp.text)
+            if not spec or "paths" not in spec:
+                continue
+
+            self.ui.ok(f"OpenAPI/Swagger spec found: {url}")
+            self.ctx["api_spec_url"] = url
+            self.endpoints.add(url)
+            self._extract_api_endpoints(spec)
+            return
+
+    def _parse_spec_body(self, text):
+        """Try JSON first, then YAML. Returns a dict or None."""
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        if yaml:
+            try:
+                data = yaml.safe_load(text)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def _extract_api_endpoints(self, spec):
+        base = self.base_url.rstrip("/")
+        paths = spec.get("paths", {})
+        if not isinstance(paths, dict):
+            return
+
+        api_endpoints = []
+        auth_headers = {}
+
+        for path_key, methods in paths.items():
+            if not isinstance(methods, dict):
+                continue
+            for method, op in methods.items():
+                method_u = method.upper()
+                if method_u not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+                    continue
+                if not isinstance(op, dict):
+                    continue
+
+                query_params, path_params, header_params = [], [], []
+                for p in op.get("parameters", []) or []:
+                    if not isinstance(p, dict):
+                        continue
+                    name = p.get("name")
+                    if not name:
+                        continue
+                    example = p.get("example")
+                    if example is None:
+                        example = (p.get("schema") or {}).get("example", "")
+                    loc = p.get("in")
+                    if loc == "query":
+                        query_params.append((name, example))
+                    elif loc == "path":
+                        path_params.append((name, example))
+                    elif loc == "header":
+                        header_params.append((name, example))
+                        if example:
+                            auth_headers[name] = str(example)
+
+                # Request body — JSON properties and/or an XML example template
+                json_props = []
+                xml_template, xml_field = None, None
+                body = op.get("requestBody", {}) or {}
+                content = body.get("content", {}) if isinstance(body, dict) else {}
+
+                json_content = content.get("application/json") if isinstance(content, dict) else None
+                if isinstance(json_content, dict):
+                    schema = json_content.get("schema", {}) or {}
+                    props = schema.get("properties", {}) or {}
+                    if isinstance(props, dict):
+                        json_props = list(props.keys())
+
+                xml_content = content.get("application/xml") if isinstance(content, dict) else None
+                if isinstance(xml_content, dict):
+                    schema = xml_content.get("schema", {}) or {}
+                    props = schema.get("properties", {}) or {}
+                    examples = xml_content.get("examples", {}) or {}
+                    example_xml = None
+                    for ex in (examples.values() if isinstance(examples, dict) else []):
+                        if isinstance(ex, dict) and "value" in ex:
+                            example_xml = ex["value"]
+                            break
+                    if isinstance(props, dict) and props and example_xml:
+                        field = next(iter(props.keys()))
+                        marker = "__GR_INJECT__"
+                        new_xml, n = re.subn(
+                            rf"(<{re.escape(field)}>).*?(</{re.escape(field)}>)",
+                            rf"\1{marker}\2", example_xml, count=1, flags=re.S,
+                        )
+                        if n:
+                            xml_template, xml_field = new_xml, field
+
+                api_endpoints.append({
+                    "url": base + path_key,
+                    "method": method_u,
+                    "path_params": path_params,
+                    "query_params": query_params,
+                    "header_params": header_params,
+                    "json_props": json_props,
+                    "xml_template": xml_template,
+                    "xml_field": xml_field,
+                })
+
+        if not api_endpoints:
+            return
+
+        self.ctx["api_endpoints"] = api_endpoints
+        if auth_headers:
+            # These are just static examples pulled from the spec (e.g.
+            # "X-Auth-Token: THISISATOKEN") — never let them clobber a real
+            # user-supplied (--header) or live-captured (auth-bypass SQLi,
+            # forged JWT, ...) credential that's already been seeded.
+            existing = self.ctx.setdefault("auth_headers", {})
+            for k, v in auth_headers.items():
+                existing.setdefault(k, v)
+
+        json_body_count = sum(len(e["json_props"]) for e in api_endpoints)
+        xml_body_count  = sum(1 for e in api_endpoints if e["xml_template"])
+        self.ui.ok(
+            f"Parsed {len(api_endpoints)} API operation(s) from spec — "
+            f"{json_body_count} JSON body param(s), {xml_body_count} XML body field(s)"
+        )
+
     def _run_katana(self):
         """Run ProjectDiscovery's Katana crawler if installed."""
         if not self.tool_runner or not self.tool_runner.is_installed("katana"):

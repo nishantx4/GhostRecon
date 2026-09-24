@@ -6,6 +6,7 @@ import time
 import json
 from datetime import datetime
 
+import core.config as config
 from core.ui import UI, Colors
 from core.findings import FindingsDB
 from core.ai_engine import AIEngine
@@ -37,6 +38,7 @@ from modules.xss        import XSSModule
 from modules.xxe        import XXEModule
 from modules.crlf       import CRLFModule
 from modules.ssrf       import SSRFModule
+from modules.lfi        import LFIModule
 from modules.deserialization import DeserializationModule
 from modules.prototype_pollution import PrototypePollutionModule
 # Phase 6: Client-Side & Logic
@@ -44,6 +46,7 @@ from modules.cors       import CORSModule
 from modules.csrf       import CSRFModule
 from modules.clickjacking import ClickjackingModule
 from modules.open_redirect import OpenRedirectModule
+from modules.host_header import HostHeaderModule
 from modules.websocket  import WebSocketModule
 # Phase 7: Advanced
 from modules.cache_poisoning import CachePoisoningModule
@@ -77,12 +80,14 @@ MODULE_MAP = {
     'xxe':       XXEModule,
     'crlf':      CRLFModule,
     'ssrf':      SSRFModule,
+    'lfi':       LFIModule,
     'desync':    DeserializationModule,
     'proto_poll': PrototypePollutionModule,
     'cors':      CORSModule,
     'csrf':      CSRFModule,
     'clickjack': ClickjackingModule,
     'redirect':  OpenRedirectModule,
+    'host_header': HostHeaderModule,
     'ws':        WebSocketModule,
     'cache':     CachePoisoningModule,
     'smuggling': SmugglingModule,
@@ -92,16 +97,77 @@ MODULE_MAP = {
     'report':    ReportModule,
 }
 
+# Human-readable labels for every selectable module (used by the TUI's
+# module-selection checklist and anywhere else module IDs need a display name).
+MODULE_LABELS = {
+    'recon':      'Reconnaissance & Crawling',
+    'cms':        'CMS Scanner',
+    'headers':    'Security Headers',
+    'sub_take':   'Subdomain Takeover',
+    'secrets':    'Secrets Exposure',
+    'jwt':        'JWT Attacks',
+    'broken_auth': 'Broken Authentication',
+    'oauth':      'OAuth Misconfiguration',
+    'idor':       'IDOR',
+    'params':     'Parameter Tampering',
+    'js':         'JS Analysis',
+    'upload':     'File Upload',
+    'mass_assign': 'Mass Assignment',
+    'sqli':       'SQL Injection',
+    'nosql':      'NoSQL Injection',
+    'ssti':       'Server-Side Template Injection',
+    'xss':        'Cross-Site Scripting',
+    'xxe':        'XXE',
+    'crlf':       'CRLF Injection',
+    'ssrf':       'SSRF',
+    'lfi':        'LFI / Path Traversal',
+    'desync':     'Deserialization',
+    'proto_poll': 'Prototype Pollution',
+    'cors':       'CORS Misconfiguration',
+    'csrf':       'CSRF',
+    'clickjack':  'Clickjacking',
+    'redirect':   'Open Redirect',
+    'host_header': 'Host Header Injection',
+    'ws':         'WebSocket Security',
+    'cache':      'Cache Poisoning',
+    'smuggling':  'HTTP Request Smuggling',
+    'rate_limit': 'Rate Limiting',
+    'graphql':    'GraphQL',
+    'nuclei':     'Nuclei Scanner',
+    'report':     'Report Generation',
+}
+
+# Scan presets — single source of truth shared by the CLI (--preset) and the
+# TUI's Quick/Standard/Full Profile buttons.
+PRESETS = {
+    'quick':    ['recon', 'cms', 'headers', 'secrets', 'cors', 'nuclei', 'report'],
+    'standard': ['recon', 'cms', 'headers', 'sub_take', 'secrets', 'idor', 'sqli',
+                 'xss', 'cors', 'ssrf', 'lfi', 'nuclei', 'report'],
+    'full':     list(MODULE_MAP.keys()),
+}
+
+
+def get_preset_modules(preset: str) -> list:
+    """Return the module ID list for a named preset (defaults to 'standard')."""
+    return list(PRESETS.get(preset, PRESETS['standard']))
+
 
 class ScanSession:
     def __init__(self, target, api_key=None, modules=None, scope=None,
                  output_dir='./ghostrecon_output', output_file=None,
                  threads=10, timeout=10, delay=0.5, verbose=False, ui=None,
-                 event_callback=None):
+                 event_callback=None, auto_install_tools=True,
+                 auth_headers=None, auth_cookies=None):
         self.target     = self._normalize_target(target)
         self.api_key    = api_key
+        self.auth_headers = dict(auth_headers or {})
+        self.auth_cookies = dict(auth_cookies or {})
         # Default profile: full scan
-        self.modules    = modules or list(MODULE_MAP.keys())
+        # `modules is None` means "not specified" -> default to everything.
+        # An explicit `[]` must stay empty, not silently balloon into a full
+        # 33-module scan — that's exactly what happened when the interactive
+        # CLI's module parser produced an empty list on a typo.
+        self.modules    = list(MODULE_MAP.keys()) if modules is None else modules
         self.scope      = scope
         self.output_dir = output_dir
         self.output_file = output_file
@@ -112,10 +178,39 @@ class ScanSession:
         self.ui         = ui or UI()
         self.start_time = None
         self.event_callback = event_callback # For TUI updates
+        self.auto_install_tools = auto_install_tools
         self.db         = FindingsDB(event_callback=self.event_callback)
         self.context    = {}  # shared data between modules (subdomains, endpoints, etc.)
-        self.ai         = AIEngine(api_key=api_key, ui=self.ui)
+        self.ai         = AIEngine(api_key=api_key, ui=self.ui, event_callback=self.event_callback)
         self.tool_runner = ExternalToolRunner(self.ui)
+
+    def _ensure_external_tools(self):
+        """
+        Auto-install the external Go tools the enabled modules actually rely
+        on (subfinder/katana/waybackurls for recon, nuclei for the Nuclei
+        module). ToolInstaller already implements this — it just was never
+        called anywhere, so every scan silently used weak built-in fallbacks
+        even when auto-install was documented as a feature.
+        """
+        if not self.auto_install_tools:
+            return
+        wanted = []
+        if 'recon' in self.modules:
+            wanted += ['subfinder', 'katana', 'waybackurls']
+        if 'nuclei' in self.modules:
+            wanted.append('nuclei')
+        wanted = sorted(set(wanted))
+        if not wanted:
+            return
+        try:
+            from core.tool_installer import ToolInstaller
+            installer = ToolInstaller(self.ui)
+            missing = [t for t in wanted if not installer.is_installed(t)]
+            if missing:
+                self.ui.info(f"Auto-installing external tools: {', '.join(missing)} ...")
+                installer.ensure_tools(missing)
+        except Exception as e:
+            self.ui.warn(f"Tool auto-install skipped: {e}")
 
     def _normalize_target(self, t):
         t = t.strip().lower()
@@ -135,14 +230,31 @@ class ScanSession:
     def run(self):
         self.start_time = time.time()
         os.makedirs(self.output_dir, exist_ok=True)
-        
+
         self._emit("scan_started", {"target": self.target, "modules": self.modules})
+
+        # Seed any user-supplied auth (--header/--cookie) before anything
+        # runs. Every module also checks/adds to this: recon.py adds static
+        # OpenAPI example headers (without overwriting these), and modules
+        # that find a live credential (e.g. sqli.py's auth-bypass capture)
+        # add to it too — so a scan that starts authenticated stays
+        # authenticated, and a scan that starts blind can become
+        # authenticated mid-run.
+        if self.auth_headers:
+            self.context['auth_headers'] = dict(self.auth_headers)
+        if self.auth_cookies:
+            self.context['auth_cookies'] = dict(self.auth_cookies)
 
         self.ui.section(f"Starting GhostRecon against: {self.target}")
         self.ui.info(f"Modules: {len(self.modules)} enabled")
-        self.ui.info(f"AI Analysis: {'Enabled — NVIDIA NIM (qwen3.5-122b)' if self.api_key else 'Local engine (no API key set)'}")
+        self.ui.info(f"AI Analysis: {'Enabled — NVIDIA NIM (' + config.get_model() + ')' if self.api_key else 'Local engine (no API key set)'}")
+        if self.auth_headers or self.auth_cookies:
+            self.ui.info(f"Auth context: {len(self.auth_headers)} header(s), {len(self.auth_cookies)} cookie(s) supplied")
         self.ui.blank()
-        
+
+        # ── External tool auto-install (subfinder/katana/waybackurls/nuclei) ──
+        self._ensure_external_tools()
+
         # ── Target Profiling (Baseline) ──
         self._emit("phase_started", {"name": "Target Profiling"})
         self.ui.section("Phase 0: Target Profiling & Fingerprinting")

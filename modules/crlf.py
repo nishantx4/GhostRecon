@@ -14,6 +14,16 @@ except ImportError:
 from modules import BaseModule
 
 
+def _qjoin(endpoint: str, query_suffix: str) -> str:
+    """Append a raw (already-encoded) query suffix to an endpoint that may
+    already have its own query string. `f"{endpoint}?{param}=..."` blindly
+    assumes no existing '?', which breaks every endpoint recon.py seeds via
+    _probe_common_paths() (e.g. /index.php?id=1) into a malformed
+    double-'?' URL that never reaches the target parameter."""
+    sep = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{sep}{query_suffix}"
+
+
 class CRLFModule(BaseModule):
     NAME = "CRLF Injection"
 
@@ -57,7 +67,7 @@ class CRLFModule(BaseModule):
         for endpoint in endpoints:
             for param in test_params:
                 for payload in payloads:
-                    url = f"{endpoint}?{param}={payload}"
+                    url = _qjoin(endpoint, f"{param}={payload}")
                     try:
                         resp = s.get(url, timeout=self.timeout, allow_redirects=False)
 

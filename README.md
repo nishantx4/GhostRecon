@@ -13,7 +13,7 @@
 
 **AI-Powered Bug Bounty Hunter & Vulnerability Scanner**
 
-[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![NVIDIA NIM](https://img.shields.io/badge/NVIDIA-NIM%20AI-76B900?style=for-the-badge&logo=nvidia&logoColor=white)](https://build.nvidia.com/)
 [![License](https://img.shields.io/badge/License-Proprietary-ef4444?style=for-the-badge)](LICENSE)
 [![Made by](https://img.shields.io/badge/Made%20by-Nishant-a855f7?style=for-the-badge)](https://github.com/nishantx4)
@@ -26,7 +26,7 @@
 
 ## 🤔 What is GhostRecon?
 
-GhostRecon v3.0 is a next-generation bug bounty and reconnaissance framework that marries traditional security tooling with an advanced AI verification engine. Built to eliminate false positives and stream execution output live via a **gorgeous Textual Terminal UI (TUI)**, GhostRecon detects **35 different classes of vulnerabilities** and uses **NVIDIA NIM AI (free tier)** to actively *help during the hunt itself*.
+GhostRecon v3.0 is a next-generation bug bounty and reconnaissance framework that marries traditional security tooling with an AI verification engine and a multi-stage statistical validator built to eliminate false positives. It detects **35 classes of vulnerabilities**, discovers and tests **pure JSON/XML REST APIs** (not just crawlable HTML sites), and can **propagate a live session across the whole scan** — so an auth-bypass found in one module is automatically reused by every module that runs after it, reaching authenticated-only endpoints that a stateless scanner would never see.
 
 Think of it as your personal ghost that haunts a target, validates findings to eliminate noise, and reports back everything it finds in real time. 👻
 
@@ -36,14 +36,17 @@ Think of it as your personal ghost that haunts a target, validates findings to e
 
 | Feature | Description |
 |---|---|
-| 🎨 **Gorgeous Textual TUI** | Fully asynchronous 3-panel interactive dashboard with live log streaming. |
-| 🛡️ **35 Scan Modules** | SQLi, XSS, XXE, Command Injection, Prototype Pollution, IDOR, GraphQL, Smuggling, etc. |
-| 🤖 **NVIDIA NIM AI** | Free-tier AI that validates findings and reads DOM structures to reduce false positives. |
-| 🧠 **Phase 0 Baseline** | Fingerprints WAFs, SPAs, calculates network jitter, and diffs Soft-404 error pages. |
-| ⚡ **External Tool Pipeline** | Automatically pipes targets through `subfinder`, `katana`, `nuclei`, streaming straight to the TUI. |
-| 🔑 **Persistent API Key** | Set once with `--set-api`, automatically used on every scan. |
-| 📄 **Auto Reports** | Generates Markdown bug bounty reports + JSON data + shell command runbooks. |
-| 🔌 **Local Fallback** | Full native Python engines if external tools or API keys are unavailable. |
+| 🎨 **Gorgeous Textual TUI** | Interactive 3-panel dashboard with a live module checklist (all 35 modules, driven by Quick/Standard/Full presets), live log streaming, and AI activity feed. |
+| 🛡️ **35 Scan Modules** | SQLi, NoSQL Injection, XSS, XXE, SSTI, LFI/Path Traversal, Command Injection, Prototype Pollution, Deserialization, IDOR, JWT attacks, Broken Auth, OAuth, Mass Assignment, GraphQL, HTTP Smuggling, Cache Poisoning, Host Header Injection, and more. |
+| 🌐 **OpenAPI/Swagger-aware** | Auto-discovers and parses `/openapi.json`, `/swagger.json`, etc. Every injection module can then test real JSON body properties, XML bodies, and URL path parameters — not just HTML forms and query strings. This is what lets GhostRecon find bugs on pure REST APIs that have zero crawlable HTML. |
+| 🔑 **Live credential propagation** | When any module discovers a working credential — an auth-bypass SQLi that returns a real session token, a forged JWT the server accepts — it's captured automatically and reused by every module that runs afterward. Combine with `--header`/`--cookie` to seed your own session and scan authenticated areas end to end. |
+| 🧠 **Multi-stage Validator engine** | Differential (true/false/control) testing, Z-score statistical timing analysis, JSON-shape-aware structural diffing, DOM-context-aware reflection analysis, and AI semantic verification — all reusable by any module, not duplicated ad hoc per module. |
+| 🤖 **NVIDIA NIM AI** | Free-tier AI that suggests payloads, validates findings, reads JS for hidden endpoints/secrets, and produces a full vulnerability-chain analysis with bounty estimates at the end of a scan. |
+| 🧬 **Phase 0 Baseline** | Fingerprints WAFs, SPAs, calculates network jitter, and diffs soft-404 error pages before any module runs. |
+| ⚡ **External Tool Pipeline** | Auto-installs and runs `subfinder`, `katana`, `waybackurls`, and a full-template `nuclei` scan, streaming results straight into the TUI. |
+| 🔓 **Active exploitation, not just static checks** | e.g. `jwt.py` forges an `alg:none` token and a weak-HMAC-secret token and actually submits them to the live endpoint rather than just flagging "weak JWT config" from inspection alone. |
+| 📄 **Auto Reports** | Generates Markdown bug bounty reports (with evidence, confidence scores, and validation steps per finding) + JSON data + shell command runbooks. |
+| 🔌 **Local Fallback** | Full native Python engines if external tools or an API key aren't available — nothing hard-requires the AI or Go tools to work. |
 
 ---
 
@@ -54,7 +57,7 @@ Think of it as your personal ghost that haunts a target, validates findings to e
 git clone https://github.com/nishantx4/ghostrecon.git
 cd ghostrecon
 
-# 2. Install dependencies (poetry or pip)
+# 2. Install dependencies
 pip install -r requirements.txt
 
 # 3. (Optional) Set your free NVIDIA NIM API key
@@ -65,6 +68,8 @@ python ghostrecon.py --help
 ```
 
 > **Note:** Get a **free** NVIDIA NIM API key at 👉 [build.nvidia.com](https://build.nvidia.com/)
+
+External tools (`subfinder`, `katana`, `waybackurls`, `nuclei`) are downloaded automatically into `~/.ghostrecon/tools/bin` on first use — no Go toolchain or manual install needed. Pass `--no-auto-install` to disable this.
 
 ---
 
@@ -86,7 +91,7 @@ python ghostrecon.py --remove-api
 
 ## 🚀 Usage
 
-GhostRecon is invoked via `ghostrecon.py`. By default, if a target is provided, it launches the interactive Textual Dashboard.
+GhostRecon is invoked via `ghostrecon.py`. By default, if a target is provided (or not — you'll get a setup screen), it launches the interactive Textual Dashboard.
 
 ### Quick Start
 ```bash
@@ -96,23 +101,56 @@ python ghostrecon.py -t example.com
 # Quick profile (Recon, CMS, Headers, Secrets, CORS, Nuclei)
 python ghostrecon.py -t example.com --preset quick
 
-# Full profile (Runs all 35 modules, extremely thorough and loud)
+# Standard profile (the sensible default set — recon, sqli, xss, ssrf, lfi, idor, ...)
+python ghostrecon.py -t example.com --preset standard
+
+# Full profile (all 35 modules — thorough and loud)
 python ghostrecon.py -t example.com --preset full
 ```
 
 ### Pick Your Modules
 ```bash
-python ghostrecon.py -t example.com --modules xss,graphql,sqli
+python ghostrecon.py -t example.com --modules xss,graphql,sqli,lfi
 ```
+
+### Scan Authenticated Areas
+```bash
+# Supply your own session so gated endpoints get tested too
+python ghostrecon.py -t example.com --header "X-Auth-Token: abc123" --cookie "session=abc123"
+
+# Repeat --header/--cookie as needed — every module (and the OpenAPI parser) uses them
+python ghostrecon.py -t example.com --header "Authorization: Bearer abc123" --header "X-Api-Version: 2"
+```
+If a module discovers a *working* credential mid-scan (e.g. an auth-bypass SQLi that returns a live token), it's captured and propagated automatically too — you don't have to already know it works.
 
 ### Legacy Headless & Output Flags
 ```bash
-# Disable the TUI and run as standard stdout CLI (Useful for CI/CD)
+# Disable the TUI and run as standard stdout CLI (useful for CI/CD)
 python ghostrecon.py -t example.com --no-tui
 
 # Save report output to a specific directory
 python ghostrecon.py -t example.com --output-dir ./my_reports/
+
+# Skip auto-installing external tools
+python ghostrecon.py -t example.com --no-auto-install
 ```
+
+---
+
+## 🌐 REST API Awareness
+
+Most scanners only find what they can crawl — a pure JSON/XML REST API with zero HTML forms is invisible to them. GhostRecon actively looks for an OpenAPI/Swagger spec (`/openapi.json`, `/openapi.yaml`, `/swagger.json`, `/v3/api-docs`, and a dozen other common locations) and, when found, parses every operation into structured test targets: JSON body properties, XML body fields (with the real discovered example body, not a guessed envelope), URL path parameters, and required auth headers. Every injection module (SQLi, NoSQL, XSS, SSTI, XXE, LFI, SSRF, Prototype Pollution, Mass Assignment, Open Redirect, ...) consumes this automatically, so a modern API-first target gets the same depth of testing as a classic HTML site.
+
+---
+
+## 🔗 Live Credential Propagation
+
+Most scanners test every endpoint unauthenticated, in isolation, one shot each. GhostRecon keeps state across the whole scan:
+
+1. Supply a known-good credential yourself with `--header`/`--cookie` (or the TUI's "Auth Header" field), **or**
+2. Let a module find one — e.g. `sqli.py` confirms an auth-bypass SQL injection on a login endpoint and the response contains a real session token,
+
+...and from that point on, every module that runs afterward automatically attaches that credential to its own requests. An auth-bypass discovered ten minutes into a scan can unlock IDOR, mass-assignment, and broken-auth testing on endpoints that were returning 401 the whole time before that.
 
 ---
 
@@ -121,8 +159,10 @@ python ghostrecon.py -t example.com --output-dir ./my_reports/
 Unlike traditional scanners, GhostRecon's AI doesn't just run at the end to generate a report — it actively assists **during** the scan at multiple stages:
 - **Baseline Profiling** to drastically reduce blind false positives.
 - **Deep JS Inspection** to hunt for hidden API routes and obfuscated secrets.
-- **Smart Response Validation** to read 200-OK responses and determine if they *actually* leak private data.
-- **Vulnerability Chain Analysis** to estimate bounty values and generate PoC outlines.
+- **Smart Response Validation** to read 200-OK responses and determine if they *actually* leak private data, and to distinguish a real secret from a placeholder/example value.
+- **Vulnerability Chain Analysis** to identify how individual findings combine into a bigger attack path, estimate bounty values, and generate PoC outlines.
+
+Every finding also carries a `confidence` label, a numeric `confidence_score`, and the list of `validation_steps` that produced it, so you can tell at a glance which findings are differential/statistically confirmed versus heuristic.
 
 ---
 

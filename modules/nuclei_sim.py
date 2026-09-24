@@ -55,50 +55,96 @@ class NucleiModule(BaseModule):
          "Robots.txt may reveal hidden paths and directories."),
     ]
 
+    # Approximate CVSS by severity when a template doesn't carry cvss-score
+    _SEVERITY_CVSS = {"critical": "9.5", "high": "8.0", "medium": "5.5", "low": "3.0", "info": "0.0"}
+
     def run(self):
         self.ui.section("Nuclei — Vulnerability Scanning")
         if not requests:
             return
 
-        # Check if real Nuclei is available
         from core.tool_runner import ExternalToolRunner
+        from core.tool_installer import ToolInstaller
         runner = ExternalToolRunner(self.ui)
+
+        if not runner.is_installed("nuclei"):
+            self.ui.warn("nuclei binary not found — attempting to auto-install...")
+            installer = ToolInstaller(self.ui)
+            installer.ensure_tools(["nuclei"])
+
         if runner.is_installed("nuclei"):
-            self.ui.info("Running real Nuclei scanner...")
-            # We use nuclei asynchronously in the TUI, but here we do a sync fallback
-            # We won't block the whole scan on nuclei unless it's headless.
-            # A better approach is the session orchestrator handling it.
-            # For now, we'll just run a fast nuclei scan on the base URL.
-            args = ["-u", self.base_url, "-t", "cves,exposures", "-j"]
-            result = runner.run_sync("nuclei", args, timeout=120)
-            
+            self.ui.info(
+                f"Running real Nuclei against {self.base_url} "
+                f"(full default template set — CVEs, exposures, misconfigs, "
+                f"takeovers, default logins, tech fingerprinting)..."
+            )
+            args = [
+                "-u", self.base_url,
+                "-jsonl",           # NDJSON output — one finding per line
+                "-silent",          # suppress banner noise from stdout
+                "-etags", "dos,fuzz",  # skip destructive/DoS-risk templates by default
+                "-rl", "100",       # requests/sec rate limit — don't hammer the target
+                "-c", "25",         # concurrent template workers
+            ]
+            # Give nuclei real headroom: on a first-ever run it may still need
+            # to pull its template repo, and a full default scan (thousands of
+            # templates) genuinely takes minutes, not seconds.
+            result = runner.run_sync("nuclei", args, timeout=600)
+
             if result.success and result.parsed_results:
                 for item in result.parsed_results:
-                    info = item.get("info", {})
-                    severity = info.get("severity", "info").lower()
-                    if severity not in ["critical", "high", "medium", "low", "info"]:
+                    info = item.get("info", {}) or {}
+                    severity = str(info.get("severity", "info")).lower()
+                    if severity not in ("critical", "high", "medium", "low", "info"):
                         severity = "info"
-                        
+
+                    classification = info.get("classification", {}) or {}
+                    cvss = classification.get("cvss-score")
+                    cvss = str(cvss) if cvss else self._SEVERITY_CVSS[severity]
+
+                    evidence = []
+                    extracted = item.get("extracted-results")
+                    if extracted:
+                        evidence.append(f"Extracted: {extracted}")
+                    matcher = item.get("matcher-name")
+                    if matcher:
+                        evidence.append(f"Matcher: {matcher}")
+
+                    matched_at = item.get("matched-at", self.base_url)
                     self.db.add(
                         title=info.get("name", "Nuclei Finding"),
                         severity=severity,
-                        url=item.get("matched-at", self.base_url),
+                        url=matched_at,
                         module=self.NAME,
-                        description=info.get("description", ""),
-                        remediation=info.get("remediation", ""),
-                        cvss=str(info.get("classification", {}).get("cvss-metrics", "")),
+                        description=info.get("description", "") or f"Detected by nuclei template '{item.get('template-id', '?')}'.",
+                        remediation=info.get("remediation", "") or "Review the matched template and target configuration; patch/upgrade or restrict access as appropriate.",
+                        cvss=cvss,
+                        evidence=evidence,
+                        references=info.get("reference") or [],
                         confidence="HIGH",
                         confidence_score=85,
                         validation_steps=["nuclei_verified"],
-                        external_tool="nuclei"
+                        external_tool="nuclei",
                     )
-                    self.ui.find(severity, info.get("name", "Finding"), item.get("matched-at", self.base_url))
+                    self.ui.find(severity, info.get("name", "Finding"), matched_at)
+                self.ui.ok(f"Nuclei scan complete — {len(result.parsed_results)} finding(s)")
                 return
             elif result.success:
-                self.ui.info("Nuclei found no vulnerabilities.")
+                self.ui.info("Nuclei ran successfully — no vulnerabilities matched.")
                 return
+            elif result.timed_out:
+                self.ui.warn(f"Nuclei timed out after {result.elapsed:.0f}s — falling back to built-in checks (weaker coverage).")
+            else:
+                self.ui.warn(f"Nuclei run failed ({result.error or 'unknown error'}) — falling back to built-in checks (weaker coverage).")
+        else:
+            self.ui.warn(
+                "nuclei is not installed and auto-install failed — using a small built-in "
+                "checklist (~17 common paths) instead of nuclei's 8000+ templates. "
+                "Install nuclei manually for real coverage: https://github.com/projectdiscovery/nuclei"
+            )
 
-        # Fallback to internal checks
+        # Fallback to internal checks — deliberately weaker than nuclei; only
+        # reached when the real scanner isn't available or failed above.
         self.ui.info("Running built-in common vulnerability checks...")
         
         try:

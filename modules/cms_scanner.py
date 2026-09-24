@@ -82,29 +82,43 @@ class CMSScannerModule(BaseModule):
                 ("/core/install.php", "Install script")
             ]
 
+        baseline = self.ctx.get("baseline_profile")
         for path, desc in paths_to_check:
             try:
                 url = urllib.parse.urljoin(self.base_url, path)
                 check_resp = s.get(url, timeout=self.timeout)
-                if check_resp.status_code == 200 and len(check_resp.text) > 10:
-                    
-                    # Prevent False Positives (e.g. 200 OK on homepage redirect)
-                    if "text/html" in check_resp.headers.get("Content-Type", "") and path.endswith(".txt"):
-                         continue # Soft 404
-                         
-                    # For WP users API, check for JSON response
-                    if path == "/wp-json/wp/v2/users" and ("id" not in check_resp.text or "name" not in check_resp.text):
-                         continue
-                         
-                    self.db.add(
-                        title=f"{cms_detected} — {desc}",
-                        severity="medium", url=url, module=self.NAME,
-                        description=f"Sensitive CMS path '{path}' is accessible.",
-                        remediation="Restrict access to this path.",
-                        cvss="5.3",
-                        confidence="HIGH",
-                        confidence_score=85
-                    )
-                    self.ui.find("medium", f"CMS Path Exposed: {desc}", url)
+                if check_resp.status_code != 200 or len(check_resp.text) <= 10:
+                    continue
+
+                # Soft-404 / SPA catch-all guard — a site that returns 200 with
+                # the same structural page for any path would otherwise flag
+                # every single one of these as "exposed".
+                if baseline and baseline.matches_soft_404(check_resp.text, check_resp.status_code):
+                    continue
+
+                # For the WP users API, require an actual JSON array of user
+                # objects — substring checks for "id"/"name" pass on any page
+                # containing those words at all (e.g. a login form).
+                if path == "/wp-json/wp/v2/users":
+                    try:
+                        data = check_resp.json()
+                    except Exception:
+                        continue
+                    if not (isinstance(data, list) and data and isinstance(data[0], dict)
+                            and "id" in data[0] and "name" in data[0]):
+                        continue
+                elif "text/html" in check_resp.headers.get("Content-Type", "") and path.endswith((".txt", "~")):
+                    continue  # HTML returned for what should be a plain-text/backup file
+
+                self.db.add(
+                    title=f"{cms_detected} — {desc}",
+                    severity="medium", url=url, module=self.NAME,
+                    description=f"Sensitive CMS path '{path}' is accessible.",
+                    remediation="Restrict access to this path.",
+                    cvss="5.3",
+                    confidence="HIGH",
+                    confidence_score=85
+                )
+                self.ui.find("medium", f"CMS Path Exposed: {desc}", url)
             except Exception:
                 pass

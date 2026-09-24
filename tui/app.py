@@ -19,6 +19,7 @@ class GhostReconApp(App):
     def __init__(self, config=None, **kwargs):
         super().__init__(**kwargs)
         self.scan_config = config or {}
+        self._ai_entry_map = {}  # track AI call entry IDs
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -32,9 +33,30 @@ class GhostReconApp(App):
         
         if self.scan_config.get("target"):
             self.push_screen("dashboard")
+            # Initialize info bar with config data
+            self._init_info_bar()
             self.run_worker(self._run_scan, thread=True)
         else:
             self.push_screen("setup")
+
+    def start_scan_from_setup(self, config: dict) -> None:
+        """Called by TargetSetupScreen once the user presses Start Scan."""
+        self.scan_config = config
+        self.push_screen("dashboard")
+        self._init_info_bar()
+        self.run_worker(self._run_scan, thread=True)
+
+    def _init_info_bar(self):
+        """Set initial values on the info bar from scan config."""
+        try:
+            dashboard = self.get_screen("dashboard")
+            from tui.widgets.scan_info_bar import ScanInfoBar
+            info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+            info_bar.target_name = self.scan_config.get("target", "—")
+            info_bar.ai_active = bool(self.scan_config.get("api_key"))
+            info_bar.start_timer()
+        except Exception:
+            pass
             
     def _run_scan(self) -> None:
         from core.session import ScanSession
@@ -60,7 +82,10 @@ class GhostReconApp(App):
             delay=self.scan_config.get("delay", 0.5),
             output_dir=self.scan_config.get("output_dir", "./ghostrecon_output"),
             ui=ui,
-            event_callback=self._handle_event
+            event_callback=self._handle_event,
+            auto_install_tools=self.scan_config.get("auto_install_tools", True),
+            auth_headers=self.scan_config.get("auth_headers"),
+            auth_cookies=self.scan_config.get("auth_cookies"),
         )
         try:
             session.run()
@@ -77,10 +102,19 @@ class GhostReconApp(App):
             dashboard = self.get_screen("dashboard")
             if not dashboard.is_current:
                 return
+
+            from tui.widgets.scan_info_bar import ScanInfoBar
+            from tui.widgets.ai_analysis_panel import AIAnalysisPanel
                 
             if event_type == "scan_started":
                 progress = dashboard.query_one("#progress_panel")
                 progress.init_modules(data.get("modules", []))
+                # Update info bar module count
+                try:
+                    info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+                    info_bar.modules_total = len(data.get("modules", []))
+                except Exception:
+                    pass
                 
             elif event_type == "module_started":
                 progress = dashboard.query_one("#progress_panel")
@@ -89,6 +123,21 @@ class GhostReconApp(App):
             elif event_type == "module_completed":
                 progress = dashboard.query_one("#progress_panel")
                 progress.complete_module(data.get("module"))
+                # Update info bar
+                try:
+                    info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+                    info_bar.modules_done += 1
+                except Exception:
+                    pass
+
+            elif event_type == "module_failed":
+                progress = dashboard.query_one("#progress_panel")
+                progress.fail_module(data.get("module"), data.get("error", ""))
+                try:
+                    info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+                    info_bar.modules_done += 1
+                except Exception:
+                    pass
                 
             elif event_type == "finding_added":
                 finding_panel = dashboard.query_one("#finding_panel")
@@ -96,7 +145,9 @@ class GhostReconApp(App):
                     title=data.get("title", "Unknown"),
                     severity=data.get("severity", "info"),
                     url=data.get("url", ""),
-                    confidence=data.get("confidence", "")
+                    confidence=data.get("confidence", ""),
+                    module=data.get("module", ""),
+                    description=data.get("description", ""),
                 )
                 
             elif event_type == "severity_updated":
@@ -107,9 +158,40 @@ class GhostReconApp(App):
                     medium=data.get("medium", 0),
                     low=data.get("low", 0)
                 )
+                # Update info bar finding counts
+                try:
+                    info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+                    info_bar.finding_counts = data
+                except Exception:
+                    pass
+
+            elif event_type == "ai_call_started":
+                try:
+                    ai_panel = dashboard.query_one("#ai_panel", AIAnalysisPanel)
+                    method = data.get("method", "unknown")
+                    context = data.get("context", "")
+                    entry_id = ai_panel.add_ai_start(method, context)
+                    # Store with a key so we can complete it later
+                    call_key = f"{method}:{context}"
+                    self._ai_entry_map[call_key] = entry_id
+                except Exception:
+                    pass
+
+            elif event_type == "ai_call_completed":
+                try:
+                    ai_panel = dashboard.query_one("#ai_panel", AIAnalysisPanel)
+                    method = data.get("method", "unknown")
+                    context = data.get("context", "")
+                    response = data.get("response", "")
+                    call_key = f"{method}:{context}"
+                    entry_id = self._ai_entry_map.pop(call_key, None)
+                    if entry_id:
+                        ai_panel.complete_ai_entry(entry_id, response)
+                except Exception:
+                    pass
                 
             elif event_type == "log":
-                # We can dump logs into a rich log inside tool execution panel
+                # Dump logs into a rich log inside tool execution panel
                 panel = dashboard.query_one("#tool_execution_panel")
                 from textual.widgets import RichLog
                 try:
@@ -121,6 +203,12 @@ class GhostReconApp(App):
                 
             elif event_type == "scan_completed":
                 self.notify("Scan completed!")
+                # Stop the timer
+                try:
+                    info_bar = dashboard.query_one("#info_bar", ScanInfoBar)
+                    info_bar.stop_timer()
+                except Exception:
+                    pass
                 self.push_screen("report")
         except Exception as e:
             self.notify(f"UI Error: {e}", severity="error")

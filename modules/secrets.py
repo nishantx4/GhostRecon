@@ -136,6 +136,24 @@ class SecretsModule(BaseModule):
                     confidence = "MEDIUM"
                     confidence_score = 65
 
+                # ── FP Check 5 (optional): AI semantic check ──
+                # Pattern matching can't tell a real DB_PASSWORD=hunter2 from a
+                # committed .env.example with DB_PASSWORD=your_password_here.
+                # Ask the AI to look at the actual content when available.
+                ai_note = None
+                if self.ai and self.ai.enabled:
+                    try:
+                        verdict = self.ai.validate_secret(label, body[:800])
+                        if verdict:
+                            ai_note = verdict.get("reason")
+                            if verdict.get("is_secret") is False and str(verdict.get("confidence", "")).lower() in ("high", "medium"):
+                                if self.verbose:
+                                    self.ui.info(f"  Skipped {path} — AI judged as placeholder/example: {ai_note}")
+                                time.sleep(self.delay)
+                                continue
+                    except Exception:
+                        pass
+
                 self.db.add(
                     title=f"Sensitive File Exposed: {label} ({path})",
                     severity="critical", url=url, module=self.NAME,
@@ -147,7 +165,9 @@ class SecretsModule(BaseModule):
                     cvss="9.8",
                     confidence=confidence,
                     confidence_score=confidence_score,
-                    validation_steps=["status_200", "content_type_validated", "pattern_matched", "soft_404_checked"],
+                    validation_steps=["status_200", "content_type_validated", "pattern_matched", "soft_404_checked"]
+                              + (["ai_verified"] if ai_note else []),
+                    evidence=[f"AI assessment: {ai_note}"] if ai_note else [],
                 )
                 self.ui.find("critical", f"Exposed: {label}", url)
                 found += 1

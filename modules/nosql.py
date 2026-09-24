@@ -15,6 +15,15 @@ except ImportError:
 from modules import BaseModule
 
 
+def _qjoin(endpoint: str, query_suffix: str) -> str:
+    """Append a raw query suffix to an endpoint that may already have its
+    own query string (recon.py seeds endpoints like /index.php?id=1 —
+    blindly appending '?param=value' would double up the '?' and the
+    payload would never reach the target parameter)."""
+    sep = "&" if "?" in endpoint else "?"
+    return f"{endpoint}{sep}{query_suffix}"
+
+
 class NoSQLModule(BaseModule):
     NAME = "NoSQL Injection"
 
@@ -29,6 +38,16 @@ class NoSQLModule(BaseModule):
 
         s = self._session()
         found = 0
+        # self.validator is provided by BaseModule.__init__ for every module.
+
+        # API endpoints from an OpenAPI/Swagger spec (recon.py) — this is the
+        # highest-signal path: real, confirmed JSON operations rather than a
+        # keyword guess on the URL (the keyword filter below, e.g. requiring
+        # "login"/"auth"/"user"/"search"/"api" in the endpoint string, would
+        # have completely missed a real endpoint like POST /tokens — no match
+        # on any of those substrings — which is exactly the class of endpoint
+        # this vuln lives on in practice).
+        found += self._test_api_endpoints(s)
 
         endpoints = [self.base_url] + self.ctx.get("endpoints", [])[:20]
 
@@ -42,8 +61,8 @@ class NoSQLModule(BaseModule):
             if any(x in endpoint for x in ["login", "auth", "search", "user", "api"]):
                 # 1. URL Parameter Injection
                 # Normally we'd look for ?user=admin. We simulate an injected request: ?user[$ne]=invalid
-                payload_url = f"{endpoint}?username[$ne]=ghostrecon&password[$ne]=ghostrecon"
-                baseline_url = f"{endpoint}?username=ghostrecon&password=ghostrecon"
+                payload_url = _qjoin(endpoint, "username[$ne]=ghostrecon&password[$ne]=ghostrecon")
+                baseline_url = _qjoin(endpoint, "username=ghostrecon&password=ghostrecon")
 
                 try:
                     resp_base = s.get(baseline_url, timeout=self.timeout)
@@ -113,3 +132,104 @@ class NoSQLModule(BaseModule):
 
         if found == 0:
             self.ui.info("No NoSQL Injection vulnerabilities detected.")
+
+    def _test_api_endpoints(self, s) -> int:
+        """
+        Test JSON body properties from an OpenAPI/Swagger spec for MongoDB
+        operator injection.
+
+        Earlier version routed this through Validator.differential_test with
+        a plain-STRING baseline_value and an OBJECT-shaped operator payload.
+        On any target with basic OpenAPI/JSON-schema request validation (very
+        common — e.g. connexion, FastAPI, express-openapi-validator), sending
+        an object where a string is declared gets rejected by the schema
+        validator itself (400 "not of type 'string'") *regardless of whether
+        a NoSQL backend exists at all*. That divergence from the string
+        baseline was being reported as CRITICAL NoSQL injection — verified as
+        a real false positive against a live (SQLite-backed, no NoSQL engine
+        in sight) target this session: both operator probes below produced
+        byte-for-byte-structurally-identical 400 schema-rejection responses.
+
+        Fixed by comparing two OBJECT-shaped probes against each other (same
+        JSON type as each other, so a type-only schema rejection treats both
+        identically and produces no differential), varying only the
+        operator's semantics: `$gt: ""` matches virtually any non-empty
+        string if evaluated, `$eq: <impossible value>` matches nothing. A
+        real difference between them can only come from the backend actually
+        evaluating the operator — never from JSON-schema type validation.
+        """
+        found = 0
+        auth_headers = self.ctx.get("auth_headers", {})
+
+        for api_ep in self.ctx.get("api_endpoints", []):
+            method = api_ep.get("method", "POST")
+            url = api_ep.get("url")
+            json_props = api_ep.get("json_props", [])
+            if not url or not json_props:
+                continue
+
+            headers = dict(auth_headers)
+            for name, example in api_ep.get("header_params", []):
+                if example:
+                    headers[name] = str(example)
+
+            for prop in json_props:
+                other = {p: "ghostrecon_value" for p in json_props if p != prop}
+
+                def send(op_value, _other=other, _prop=prop, _url=url, _method=method, _headers=headers):
+                    body = {**_other, _prop: op_value}
+                    try:
+                        return s.request(_method, _url, json=body, headers=_headers, timeout=self.timeout)
+                    except Exception:
+                        return None
+
+                true_resp  = send({"$gt": ""})
+                false_resp = send({"$eq": "ghostrecon_impossible_9f3ae2"})
+                if true_resp is None or false_resp is None:
+                    continue
+
+                same_status = true_resp.status_code == false_resp.status_code
+                same_shape  = (self.validator._structural_hash(true_resp.text) ==
+                               self.validator._structural_hash(false_resp.text))
+                if same_status and same_shape:
+                    continue  # identically treated -> operator was never evaluated
+
+                # Confirm with a control repeat of the "true" probe before reporting.
+                control_resp = send({"$gt": ""})
+                if control_resp is None:
+                    continue
+                control_matches_true = (
+                    control_resp.status_code == true_resp.status_code and
+                    self.validator._structural_hash(control_resp.text) == self.validator._structural_hash(true_resp.text)
+                )
+                if not control_matches_true:
+                    continue  # not stable -> don't report
+
+                self.db.add(
+                    title=f"NoSQL Injection — Operator Injection in '{prop}' (JSON body)",
+                    severity="high", url=url, module=self.NAME,
+                    description=(
+                        f"JSON body property '{prop}' behaves differently, in a stable/repeatable "
+                        "way, when sent a MongoDB query operator ($gt vs. $eq-impossible) instead "
+                        "of a plain scalar — indicating the value is passed unsanitized into a "
+                        "NoSQL query rather than being rejected by schema validation."
+                    ),
+                    remediation=(
+                        "Enforce strict JSON schema validation — reject non-scalar (object/array) "
+                        "values for fields that should only ever be strings/numbers — before "
+                        "passing input to the query layer."
+                    ),
+                    cvss="8.5",
+                    confidence="HIGH", confidence_score=80,
+                    validation_steps=["operator_pair_differential", "control_repeat"],
+                    evidence=[
+                        f"$gt probe: status={true_resp.status_code}, {len(true_resp.text)}b",
+                        f"$eq-impossible probe: status={false_resp.status_code}, {len(false_resp.text)}b",
+                    ],
+                )
+                self.ui.find("high", f"NoSQL Injection via '{prop}' JSON body", url)
+                found += 1
+
+                if found > 5:
+                    return found
+        return found

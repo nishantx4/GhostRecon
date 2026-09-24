@@ -250,7 +250,7 @@ class BaselineProfiler:
             self.ui.info("Fingerprinting default response...")
 
         resp = self._get(self.base_url)
-        if not resp:
+        if resp is None:
             return
 
         profile.default_status = resp.status_code
@@ -305,7 +305,7 @@ class BaselineProfiler:
             start = time.time()
             resp = self._get(self.base_url)
             elapsed = time.time() - start
-            if resp:
+            if resp is not None:
                 times.append(elapsed)
 
         if len(times) >= 3:
@@ -325,7 +325,7 @@ class BaselineProfiler:
             self.ui.info("Detecting WAF/CDN...")
 
         resp = self._get(self.base_url)
-        if not resp:
+        if resp is None:
             return
 
         headers_lower = {k.lower(): v for k, v in resp.headers.items()}
@@ -359,7 +359,7 @@ class BaselineProfiler:
             self.ui.info("Fingerprinting technologies...")
 
         resp = self._get(self.base_url)
-        if not resp:
+        if resp is None:
             return
 
         # Server header
@@ -390,7 +390,7 @@ class BaselineProfiler:
     def _profile_spa(self, profile: BaselineProfile):
         """Detect Single Page Application frameworks."""
         resp = self._get(self.base_url)
-        if not resp:
+        if resp is None:
             return
 
         body = resp.text[:10000]

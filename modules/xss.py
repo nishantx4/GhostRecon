@@ -237,7 +237,7 @@ class XSSModule(BaseModule):
                     test_data[param] = canary
 
                 resp = self._send(url, method, test_params, test_data)
-                if not resp:
+                if resp is None:
                     continue
 
                 # Canary must appear UNENCODED in the body.
@@ -291,7 +291,7 @@ class XSSModule(BaseModule):
                     test_data[param] = payload
 
                 resp = self._send(url, method, test_params, test_data)
-                if not resp:
+                if resp is None:
                     continue
 
                 if self._payload_executes(resp.text, payload):
@@ -356,11 +356,27 @@ class XSSModule(BaseModule):
         if not body or not payload:
             return False
 
-        # Attempt to use Validator's DOM analysis
-        from core.validator import Validator
-        validator = Validator()
-        if validator.validate_xss_reflection(body, payload):
-            return True
+        # Attempt to use Validator's DOM-context-aware reflection analysis.
+        # NOTE: this previously called a method that does not exist on
+        # Validator (`validate_xss_reflection`), which raised AttributeError
+        # on every single call. That exception was silently swallowed by the
+        # bare `except Exception: continue` in _run_payloads, which meant
+        # this function never returned True and XSS detection never reported
+        # a single finding, on any target, ever. The real method is
+        # `validate_reflection`, which returns a dict, not a bool.
+        try:
+            from core.validator import Validator
+            validator = Validator()
+            result = validator.validate_reflection(body, payload)
+            if result.get("exploitable"):
+                return True
+            if result.get("context") not in ("unknown", "none"):
+                # Validator reached a definitive verdict (e.g. safely encoded,
+                # trapped in a comment, contained by quotes) — trust it rather
+                # than falling through to the much weaker string-only checks.
+                return False
+        except Exception:
+            pass
 
         # Fallback to stringent string matching if DOM check fails but might be true
         # Key executable fragments that would trigger JS

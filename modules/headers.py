@@ -42,7 +42,7 @@ class HeadersModule(BaseModule):
             pass
 
         resp = self._get(self.base_url)
-        if not resp:
+        if resp is None:
             self.ui.error(f"Could not reach {self.base_url}")
             return
 
@@ -61,6 +61,53 @@ class HeadersModule(BaseModule):
                     confidence="high",
                 )
                 self.ui.find(severity, f"Missing: {header}", self.base_url)
+
+        # A header being PRESENT doesn't mean it's configured safely — these
+        # checks catch the common case of a header existing but effectively
+        # disabled or too permissive to provide real protection.
+        hsts_val = headers.get("strict-transport-security", "")
+        if hsts_val:
+            m = re.search(r"max-age\s*=\s*(\d+)", hsts_val, re.I)
+            max_age = int(m.group(1)) if m else 0
+            if max_age <= 0:
+                self.db.add(
+                    title="HSTS Present But Disabled (max-age=0)",
+                    severity="high", url=self.base_url, module=self.NAME,
+                    description=f"Strict-Transport-Security is set (\"{hsts_val}\") but max-age is {max_age}, which disables HSTS enforcement entirely.",
+                    remediation="Set Strict-Transport-Security max-age to at least 31536000 (1 year), ideally with includeSubDomains and preload.",
+                    cvss="6.5", confidence="high",
+                )
+                self.ui.find("high", "HSTS present but disabled (max-age=0)", self.base_url)
+            elif max_age < 15552000:  # < ~6 months
+                self.db.add(
+                    title="Weak HSTS max-age",
+                    severity="low", url=self.base_url, module=self.NAME,
+                    description=f"Strict-Transport-Security max-age is only {max_age}s (~{max_age // 86400} days), below the widely recommended 1-year minimum.",
+                    remediation="Increase Strict-Transport-Security max-age to at least 31536000 seconds (1 year).",
+                    cvss="3.1", confidence="medium",
+                )
+                self.ui.find("low", "Weak HSTS max-age", self.base_url)
+
+        csp_val = headers.get("content-security-policy", "")
+        if csp_val:
+            csp_lower = csp_val.lower()
+            weak_reasons = []
+            if "unsafe-inline" in csp_lower:
+                weak_reasons.append("allows 'unsafe-inline' (defeats CSP's main XSS mitigation)")
+            if "unsafe-eval" in csp_lower:
+                weak_reasons.append("allows 'unsafe-eval'")
+            if re.search(r"(default-src|script-src)\s+[^;]*\*", csp_lower):
+                weak_reasons.append("uses a wildcard (*) source on default-src/script-src")
+            if weak_reasons:
+                self.db.add(
+                    title="Weak Content-Security-Policy",
+                    severity="medium", url=self.base_url, module=self.NAME,
+                    description=f"A CSP is present but weakened: {'; '.join(weak_reasons)}.",
+                    remediation="Remove 'unsafe-inline'/'unsafe-eval' in favor of nonces or hashes for inline scripts, and avoid wildcard sources.",
+                    cvss="5.4", confidence="high",
+                    evidence=[f"CSP: {csp_val[:300]}"],
+                )
+                self.ui.find("medium", "Weak CSP (unsafe directives / wildcard sources)", self.base_url)
 
         # Check for information disclosure headers
         for header, (severity, desc) in self.DANGEROUS_HEADERS.items():

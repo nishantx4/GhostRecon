@@ -35,20 +35,29 @@ class RateLimitModule(BaseModule):
         found = 0
 
         for endpoint in sensitive_endpoints[:3]:
-            try:
-                # Send 30 rapid requests
-                hit_rate_limit = False
-                for i in range(30):
+            # Send 30 rapid requests. Each request is caught individually —
+            # previously one flaky/timed-out request anywhere in the loop
+            # raised out to the outer `except: pass` and aborted the ENTIRE
+            # 30-request test for that endpoint, silently reporting nothing
+            # rather than "no rate limit observed" or retrying.
+            hit_rate_limit = False
+            completed = 0
+            for i in range(30):
+                try:
                     # Rotate IP to test bypass
                     headers = {"X-Forwarded-For": f"127.0.0.{i+1}"}
                     resp = s.get(endpoint, headers=headers, timeout=5)
-                    
+                    completed += 1
+
                     if resp.status_code == 429:
                         hit_rate_limit = True
                         break
-                    
-                    time.sleep(0.01) # rapid fire
 
+                    time.sleep(0.01)  # rapid fire
+                except Exception:
+                    continue
+
+            if completed >= 20:  # enough real requests landed to trust the result
                 if not hit_rate_limit:
                     self.db.add(
                         title="Missing Rate Limiting on Authentication Endpoint",
@@ -66,8 +75,6 @@ class RateLimitModule(BaseModule):
                     )
                     self.ui.find("high", "Missing Rate Limit", endpoint)
                     found += 1
-            except Exception:
-                pass
 
         if found == 0:
             self.ui.info("No rate limit vulnerabilities detected.")

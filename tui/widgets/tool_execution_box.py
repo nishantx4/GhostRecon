@@ -26,14 +26,7 @@ class ToolExecutionBox(Collapsible):
         self._update_title()
 
     def _update_title(self) -> None:
-        icons = {
-            "PENDING": "⏳ PENDING",
-            "RUNNING": "⚡ RUNNING",
-            "SUCCESS": "✓ SUCCESS",
-            "FAILED": "❌ FAILED"
-        }
-        icon = icons.get(self.status, self.status)
-        self.title = f"[{icon}] {self.command} ({self.elapsed_time:.1f}s)"
+        self.title = f"[{self.status}] {self.command} ({self.elapsed_time:.1f}s)"
 
     @work(thread=True)
     async def execute(self):

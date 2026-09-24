@@ -25,8 +25,12 @@ TAKEOVER_SIGNATURES = {
     "s3.amazonaws.com": ("AWS S3", "NoSuchBucket"),
     "s3-website": ("AWS S3 Website", "NoSuchBucket"),
     "cloudfront.net": ("AWS CloudFront", "Bad request"),
-    "azurewebsites.net": ("Azure", ""),
-    "cloudapp.azure.com": ("Azure", ""),
+    # Empty signature = no reliable body fingerprint exists for this service;
+    # it can only be confirmed via NXDOMAIN, so it deliberately never
+    # auto-confirms on a resolving-but-unclaimed CNAME (avoids false positives
+    # on a documented edge case — see the community can-i-take-over-xyz list).
+    "azurewebsites.net": ("Azure App Service", "404 web site not found"),
+    "cloudapp.azure.com": ("Azure Cloud Service", "404 web site not found"),
     "trafficmanager.net": ("Azure Traffic Manager", ""),
     "blob.core.windows.net": ("Azure Blob", "BlobNotFound"),
     "shopify.com": ("Shopify", "Sorry, this shop is currently unavailable"),

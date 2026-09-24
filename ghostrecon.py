@@ -86,7 +86,13 @@ Get a free NVIDIA NIM API key at: https://build.nvidia.com/
     scan_group.add_argument('--timeout',           type=int, default=10, help='Request timeout (default: 10s)')
     scan_group.add_argument('--delay',             type=float, default=0.5, help='Delay between requests (default: 0.5s)')
     scan_group.add_argument('--confidence',        type=int, default=60, help='Minimum confidence score (0-100) to report')
+    scan_group.add_argument('--header',            action='append', metavar='"Name: Value"',
+                             help='Extra header sent with every request (repeatable), e.g. --header "X-Auth-Token: abc123". '
+                                  'Use this to scan authenticated areas — every module (and the API-spec parser) will use it.')
+    scan_group.add_argument('--cookie',            action='append', metavar='name=value',
+                             help='Extra cookie sent with every request (repeatable), e.g. --cookie "session=abc123"')
     scan_group.add_argument('--no-tui',            action='store_true', help='Disable Textual TUI (run headless)')
+    scan_group.add_argument('--no-auto-install',   action='store_true', help='Do not auto-download external tools (nuclei/subfinder/katana/waybackurls)')
     scan_group.add_argument('--no-color',          action='store_true', help='Disable colored output (headless only)')
     scan_group.add_argument('--verbose', '-v',     action='store_true', help='Verbose output (headless only)')
     scan_group.add_argument('--interactive', '-i', action='store_true', help='Legacy interactive mode')
@@ -148,13 +154,31 @@ def handle_api_commands(args, ui) -> bool:
 
 
 def get_preset_modules(preset: str):
-    if preset == 'quick':
-        return ['recon', 'cms', 'headers', 'secrets', 'cors', 'nuclei', 'report']
-    elif preset == 'full':
-        from core.session import MODULE_MAP
-        return list(MODULE_MAP.keys())
-    else: # standard
-        return ['recon', 'cms', 'headers', 'sub_take', 'secrets', 'idor', 'sqli', 'xss', 'cors', 'ssrf', 'nuclei', 'report']
+    from core.session import get_preset_modules as _get_preset_modules
+    return _get_preset_modules(preset)
+
+
+def parse_headers(header_args) -> dict:
+    """Parse repeated --header "Name: Value" args into a dict."""
+    headers = {}
+    for h in (header_args or []):
+        name, sep, value = h.partition(':')
+        if not sep:
+            continue
+        headers[name.strip()] = value.strip()
+    return headers
+
+
+def parse_cookies(cookie_args) -> dict:
+    """Parse repeated --cookie "name=value" args into a dict."""
+    cookies = {}
+    for c in (cookie_args or []):
+        name, sep, value = c.partition('=')
+        if not sep:
+            continue
+        cookies[name.strip()] = value.strip()
+    return cookies
+
 
 def run_headless(args, ui, api_key):
     """Run in legacy headless CLI mode."""
@@ -185,6 +209,9 @@ def run_headless(args, ui, api_key):
         delay=args.delay,
         verbose=args.verbose,
         ui=ui,
+        auto_install_tools=not args.no_auto_install,
+        auth_headers=parse_headers(args.header),
+        auth_cookies=parse_cookies(args.cookie),
     )
 
     try:
@@ -222,8 +249,11 @@ def main():
                 "timeout": args.timeout,
                 "delay": args.delay,
                 "output_dir": args.output_dir,
+                "auto_install_tools": not args.no_auto_install,
+                "auth_headers": parse_headers(args.header),
+                "auth_cookies": parse_cookies(args.cookie),
             }
-            
+
             app = GhostReconApp(config=tui_config)
             app.run()
             

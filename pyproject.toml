@@ -4,7 +4,7 @@ version = "3.0.0"
 description = "AI-Powered Bug Bounty Hunter CLI — Recon, Scan, Verify, Report"
 authors = [{name = "Nishant"}]
 readme = "README.md"
-license = {text = "GPL-3.0"}
+license = {text = "Proprietary"}
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",
@@ -15,6 +15,8 @@ dependencies = [
     "pyjwt>=2.8",
     "dnspython>=2.6",
     "aiofiles>=24.1",
+    "pyyaml>=6.0",
+    "websocket-client>=1.7",
 ]
 
 [project.optional-dependencies]

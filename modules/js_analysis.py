@@ -2,6 +2,7 @@
 JSModule — GhostRecon module.
 """
 import re
+import math
 import time
 import urllib.parse
 
@@ -136,12 +137,13 @@ class JSModule(BaseModule):
         self.ctx["js_secrets"] = found_secrets
         if found_secrets:
             for url, stype, val in found_secrets:
-                
-                # Check FP
-                if hasattr(self, 'validator') and self.validator:
-                     if self.validator.is_entropy_low(val):
-                          continue
-                          
+
+                # Check FP: low-entropy strings ("aaaaaaaa", "111111", repeated
+                # runs) are very unlikely to be a real key/token even if they
+                # matched a secret pattern.
+                if self._shannon_entropy(val) < 2.5:
+                    continue
+
                 self.db.add(
                     title=f"Secret Exposed in JavaScript: {stype}",
                     severity="high",
@@ -157,6 +159,18 @@ class JSModule(BaseModule):
                 self.ui.find("high", f"JS Secret: {stype}", url)
         else:
             self.ui.info("No secrets found in JavaScript files.")
+
+    @staticmethod
+    def _shannon_entropy(s: str) -> float:
+        """Bits of entropy per character — low values mean 'aaaaaa' / '111111'
+        style placeholders rather than a real random-looking key/token."""
+        if not s:
+            return 0.0
+        freq = {}
+        for ch in s:
+            freq[ch] = freq.get(ch, 0) + 1
+        length = len(s)
+        return -sum((c / length) * math.log2(c / length) for c in freq.values())
 
 
 # ─── Params Module ─────────────────────────────────────────────────────────────

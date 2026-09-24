@@ -24,10 +24,39 @@ Usage:
 """
 
 import re
+import json
 import hashlib
 import time
 import statistics
 from typing import Any
+
+
+def _json_shape_paths(data, prefix="$", depth=0):
+    """
+    Recursively describe a JSON value's *shape* (key paths + value types),
+    not its values — so two structurally identical responses with different
+    content (e.g. two successful logins for different users) still hash the
+    same, while a genuinely different shape (a 401 error body vs. a 200
+    success body) correctly diverges. Used by Validator._structural_hash to
+    make differential comparison meaningful on JSON API responses, which
+    otherwise contain no HTML tags for the tag-sequence hash to key off.
+    """
+    if depth > 6:
+        return [f"{prefix}:{type(data).__name__}"]
+    if isinstance(data, dict):
+        if not data:
+            return [f"{prefix}:empty_dict"]
+        paths = []
+        for k in sorted(data.keys(), key=str)[:50]:
+            paths.extend(_json_shape_paths(data[k], f"{prefix}.{k}", depth + 1))
+        return paths
+    if isinstance(data, list):
+        if not data:
+            return [f"{prefix}:empty_list"]
+        # Only the first element's shape + a length bucket — the hash
+        # shouldn't depend on exactly how many items came back.
+        return [f"{prefix}:list[{min(len(data), 50)}]"] + _json_shape_paths(data[0], f"{prefix}[]", depth + 1)
+    return [f"{prefix}:{type(data).__name__}"]
 
 
 class Validator:
@@ -164,6 +193,7 @@ class Validator:
         false_payload: str,
         baseline_value: str = "",
         timeout: int = 10,
+        send_fn=None,
     ) -> dict:
         """
         Three-probe differential test for boolean-based injection.
@@ -171,6 +201,13 @@ class Validator:
         1. Send true_payload → should match baseline behavior
         2. Send false_payload → should differ from baseline
         3. Send baseline_value again → should recover to baseline (control)
+
+        Args:
+            send_fn: optional callable(value: str) -> response. When given,
+                it is used to deliver each probe value instead of the default
+                GET-query-string injection — lets callers drive the same
+                true/false/control logic through POST bodies, JSON, XML,
+                headers, or path segments.
 
         Returns:
             {"valid": bool, "confidence": str, "confidence_score": int, "details": str}
@@ -184,58 +221,82 @@ class Validator:
             new_query = urlencode(params, doseq=True)
             return urlunparse(parsed._replace(query=new_query))
 
-        # Baseline request
-        baseline_url = inject_param(url, param, baseline_value)
-        baseline_resp = self._get(baseline_url, timeout=timeout)
-        if not baseline_resp:
+        if send_fn:
+            probe = lambda value: send_fn(value)
+        else:
+            probe = lambda value: self._get(inject_param(url, param, value), timeout=timeout)
+
+        # Baseline request. NOTE: requests.Response is falsy for ANY non-2xx
+        # status (bool(resp) == resp.ok) — a 401/403/500 response is a
+        # perfectly valid, meaningful probe result (often exactly where the
+        # interesting behavior is), so every check here must be `is None`,
+        # never plain truthiness, or auth-walled/error-returning endpoints
+        # get silently treated as "request failed" and skipped entirely.
+        baseline_resp = probe(baseline_value)
+        if baseline_resp is None:
             return {"valid": False, "confidence": "LOW", "confidence_score": 0, "details": "Baseline request failed"}
 
         baseline_hash = self._structural_hash(baseline_resp.text)
         baseline_len = len(baseline_resp.text)
 
         # True probe
-        true_url = inject_param(url, param, true_payload)
-        true_resp = self._get(true_url, timeout=timeout)
-        if not true_resp:
+        true_resp = probe(true_payload)
+        if true_resp is None:
             return {"valid": False, "confidence": "LOW", "confidence_score": 0, "details": "True probe failed"}
 
         true_hash = self._structural_hash(true_resp.text)
         true_len = len(true_resp.text)
 
         # False probe
-        false_url = inject_param(url, param, false_payload)
-        false_resp = self._get(false_url, timeout=timeout)
-        if not false_resp:
+        false_resp = probe(false_payload)
+        if false_resp is None:
             return {"valid": False, "confidence": "LOW", "confidence_score": 0, "details": "False probe failed"}
 
         false_hash = self._structural_hash(false_resp.text)
         false_len = len(false_resp.text)
 
         # Control probe (repeat baseline)
-        control_resp = self._get(baseline_url, timeout=timeout)
-        control_hash = self._structural_hash(control_resp.text) if control_resp else ""
+        control_resp = probe(baseline_value)
+        control_hash = self._structural_hash(control_resp.text) if control_resp is not None else ""
 
-        # Analysis:
-        # True probe should be similar to baseline
-        true_matches_baseline = (true_hash == baseline_hash) or (abs(true_len - baseline_len) < max(50, baseline_len * 0.03))
-        # False probe should differ from baseline
-        false_differs = (false_hash != baseline_hash) and (abs(false_len - baseline_len) > max(50, baseline_len * 0.03))
+        # Analysis. We do NOT assume the baseline_value represents the "true"
+        # condition — that only holds for classic `?id=1` style params. For
+        # something like a login endpoint, the baseline is deliberately
+        # invalid credentials (a FALSE condition), so a true auth-bypass
+        # payload is the one that DIFFERS from baseline, and the false payload
+        # is the one that matches it (still rejected, same as baseline). Both
+        # orientations are checked — only the divergence between true/false,
+        # and one of them anchoring to the known-stable baseline, matters.
+        def _matches_baseline(h, l):
+            return (h == baseline_hash) or (abs(l - baseline_len) < max(50, baseline_len * 0.03))
+
+        true_matches_baseline  = _matches_baseline(true_hash, true_len)
+        false_matches_baseline = _matches_baseline(false_hash, false_len)
+        true_differs  = not true_matches_baseline
+        false_differs = not false_matches_baseline
         # Control should match baseline (proves no jitter)
         control_matches = control_hash == baseline_hash if control_hash else False
 
-        if true_matches_baseline and false_differs and control_matches:
+        # Orientation A: baseline == true state (e.g. ?id=1)
+        orientation_a = true_matches_baseline and false_differs
+        # Orientation B: baseline == false state (e.g. invalid login creds)
+        orientation_b = false_matches_baseline and true_differs
+        orientation = "true≈baseline, false diverges" if orientation_a else "false≈baseline, true diverges"
+
+        if (orientation_a or orientation_b) and control_matches:
             return {
                 "valid": True,
                 "confidence": "CONFIRMED",
                 "confidence_score": 95,
-                "details": f"Differential confirmed: true={true_len}b ≈ baseline={baseline_len}b, false={false_len}b differs, control recovered",
+                "details": f"Differential confirmed ({orientation}): true={true_len}b, false={false_len}b, "
+                           f"baseline={baseline_len}b, control recovered",
             }
-        elif true_matches_baseline and false_differs:
+        elif orientation_a or orientation_b:
             return {
                 "valid": True,
                 "confidence": "HIGH",
                 "confidence_score": 80,
-                "details": f"Differential likely: true/false differ but control probe inconclusive",
+                "details": f"Differential likely ({orientation}): true/false diverge but control probe inconclusive",
             }
         else:
             return {
@@ -258,6 +319,7 @@ class Validator:
         baseline_value: str = "",
         timeout: int = 15,
         z_threshold: float = 3.5,
+        send_fn=None,
     ) -> dict:
         """
         Statistical timing verification for time-based blind injection.
@@ -267,6 +329,11 @@ class Validator:
         3. Compute Z-score: Z = (T_payload - μ) / σ
         4. Send control probe → must return to baseline
         5. Require Z ≥ z_threshold AND control recovery
+
+        Args:
+            send_fn: optional callable(value: str, timeout: float) -> response.
+                When given, used to deliver every probe instead of the default
+                GET-query-string injection (see differential_test).
 
         Returns:
             {"valid": bool, "confidence": str, "confidence_score": int, "z_score": float, "details": str}
@@ -280,19 +347,23 @@ class Validator:
             new_query = urlencode(params, doseq=True)
             return urlunparse(parsed._replace(query=new_query))
 
+        if send_fn:
+            probe = lambda value, t: send_fn(value, t)
+        else:
+            probe = lambda value, t: self._get(inject_param(url, param, value), timeout=t)
+
         # Use stored baseline if available, otherwise measure
         if self.baseline and self.baseline.baseline_mean > 0:
             mu = self.baseline.baseline_mean
             sigma = self.baseline.baseline_stdev
         else:
             # Measure baseline
-            baseline_url = inject_param(url, param, baseline_value)
             times = []
             for _ in range(5):
                 start = time.time()
-                resp = self._get(baseline_url, timeout=timeout)
+                resp = probe(baseline_value, timeout)
                 elapsed = time.time() - start
-                if resp:
+                if resp is not None:
                     times.append(elapsed)
 
             if len(times) < 3:
@@ -306,24 +377,22 @@ class Validator:
             sigma = 0.05
 
         # Send delay payload
-        delay_url = inject_param(url, param, delay_payload)
         start = time.time()
-        resp = self._get(delay_url, timeout=timeout + expected_delay + 5)
+        resp = probe(delay_payload, timeout + expected_delay + 5)
         payload_time = time.time() - start
 
-        if not resp:
+        if resp is None:
             return {"valid": False, "confidence": "LOW", "confidence_score": 0, "z_score": 0, "details": "Payload request failed or timed out"}
 
         # Calculate Z-score
         z_score = (payload_time - mu) / sigma
 
         # Control probe — must return to baseline
-        control_url = inject_param(url, param, baseline_value)
         start = time.time()
-        control_resp = self._get(control_url, timeout=timeout)
+        control_resp = probe(baseline_value, timeout)
         control_time = time.time() - start
 
-        control_z = (control_time - mu) / sigma if control_resp else 999
+        control_z = (control_time - mu) / sigma if control_resp is not None else 999
 
         # Verdict
         payload_delayed = z_score >= z_threshold and payload_time >= (mu + expected_delay * 0.7)
@@ -493,9 +562,26 @@ class Validator:
     # HELPERS
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def _structural_hash(self, html: str) -> str:
-        """Hash of HTML tag structure for structural comparison."""
-        tags = re.findall(r'</?[a-zA-Z][a-zA-Z0-9]*[^>]*>', html)
+    def _structural_hash(self, body: str) -> str:
+        """
+        Hash of the response's structure for differential comparison.
+        JSON bodies (the norm for REST APIs) are hashed by key-path shape,
+        not raw HTML-tag sequence — the tag regex finds nothing in a JSON
+        body, which previously made every JSON response hash identically
+        (MD5 of an empty string) and silently turned the structural-equality
+        check in differential_test()/validate_time_based() into a no-op for
+        any JSON API. Falls back to HTML tag-sequence hashing otherwise.
+        """
+        stripped = body.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                data = json.loads(stripped)
+                paths = sorted(_json_shape_paths(data))
+                return hashlib.md5("|".join(paths).encode()).hexdigest()
+            except Exception:
+                pass
+
+        tags = re.findall(r'</?[a-zA-Z][a-zA-Z0-9]*[^>]*>', body)
         normalized = []
         for tag in tags[:200]:
             match = re.match(r'</?([a-zA-Z][a-zA-Z0-9]*)', tag)

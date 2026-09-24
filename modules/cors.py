@@ -66,12 +66,34 @@ class CORSModule(BaseModule):
                     if creds_allowed and acao != "*":
                         severity = "high"
                         confidence_score = 90
+                        description = (
+                            f"The server reflects the attacker-controlled Origin header "
+                            f"('{origin}') back in Access-Control-Allow-Origin AND sets "
+                            f"Access-Control-Allow-Credentials: true. Any site can make "
+                            f"authenticated cross-origin requests using the victim's cookies/"
+                            f"session and read the response, leading to full account "
+                            f"compromise via CSRF-like data theft."
+                        )
                     elif acao == "null":
                         severity = "medium"
                         confidence_score = 75
+                        description = (
+                            f"The server reflects the 'null' Origin in Access-Control-Allow-Origin. "
+                            f"'null' is sent by sandboxed iframes and data:/file: origins, so an "
+                            f"attacker can trivially craft a page that satisfies this check and "
+                            f"read cross-origin responses."
+                            + (" Combined with Access-Control-Allow-Credentials: true, this exposes "
+                               "authenticated data." if creds_allowed else "")
+                        )
                     else:
                         severity = "medium"
                         confidence_score = 70
+                        description = (
+                            f"The server reflects the attacker-controlled Origin header "
+                            f"('{origin}') back in Access-Control-Allow-Origin. While no "
+                            f"credentials are exposed here, this still permits arbitrary "
+                            f"cross-origin reads of any non-credentialed response data."
+                        )
 
                     self.db.add(
                         title=f"CORS Misconfiguration — Reflected Origin: {acao}",

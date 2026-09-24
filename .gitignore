@@ -54,3 +54,6 @@ logs/
 # OS
 .DS_Store
 desktop.ini
+
+# Local-only notes, never pushed
+context.md

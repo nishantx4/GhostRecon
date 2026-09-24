@@ -1,6 +1,7 @@
 """
 AIEngine — NVIDIA NIM powered hunting + analysis engine.
-Uses qwen/qwen3.5-122b-a10b with thinking mode via direct requests (streaming SSE).
+Model is whatever is configured via `--set-model` (see core/config.py),
+called via direct requests (streaming SSE).
 Falls back to a local rule-based engine when no API key is configured.
 
 Active hunting roles:
@@ -15,26 +16,36 @@ Active hunting roles:
   - generate_report()       → write a professional bug bounty report
 """
 import json
+import re
 import requests as _requests
 import core.config as config
 
 
 # ── Model config ──────────────────────────────────────────────────────────────
 NVIDIA_INVOKE_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL      = "qwen/qwen3.5-122b-a10b"
 
-# Models that support the qwen-style thinking mode kwarg.
-_THINKING_MODELS = ("qwen/", "deepseek-ai/")
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-def _supports_thinking(model: str) -> bool:
-    return any(model.startswith(p) for p in _THINKING_MODELS)
+def _strip_thinking(text: str) -> str:
+    """Remove any stray <think>...</think> reasoning block a model emits
+    inline in `content` despite enable_thinking=False."""
+    return _THINK_TAG_RE.sub("", text).strip()
 
 
 class AIEngine:
-    def __init__(self, api_key: str | None = None, ui=None):
+    def __init__(self, api_key: str | None = None, ui=None, event_callback=None):
         self.api_key = api_key
         self.ui      = ui
+        self.event_callback = event_callback
+        self._current_call_method = None
+
+    def _emit_event(self, event_type: str, data: dict):
+        if self.event_callback:
+            try:
+                self.event_callback(event_type, data)
+            except Exception:
+                pass
 
     @property
     def enabled(self) -> bool:
@@ -43,7 +54,8 @@ class AIEngine:
     # ── Internal streaming call ───────────────────────────────────────────────
 
     def _call(self, system: str, user: str, max_tokens: int = 2048,
-              stream_to_ui: bool = False) -> str | None:
+              stream_to_ui: bool = False,
+              method_hint: str = "", context_hint: str = "") -> str | None:
         """
         POST to NVIDIA NIM with streaming SSE.
         Collects the full streamed response and returns it as a string.
@@ -51,6 +63,13 @@ class AIEngine:
         """
         if not self.api_key:
             return None
+
+        # Emit start event for TUI
+        if method_hint:
+            self._emit_event("ai_call_started", {
+                "method": method_hint,
+                "context": context_hint,
+            })
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -68,8 +87,13 @@ class AIEngine:
             "top_p": 0.95,
             "stream": True,
         }
-        if _supports_thinking(config.get_model()):
-            payload["chat_template_kwargs"] = {"enable_thinking": True}
+        # Reasoning models (qwen, deepseek, nemotron, ...) default to emitting a
+        # chain-of-thought trace inline in `content`. Every caller here wants a
+        # short, parseable answer, not the reasoning trace — and with the small
+        # max_tokens budgets used throughout this file, a thinking trace eats
+        # the whole budget and truncates the real answer before it's written.
+        # Explicitly disable it; models that don't recognize the kwarg ignore it.
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         try:
             resp = _requests.post(
@@ -109,7 +133,17 @@ class AIEngine:
             if stream_to_ui and self.ui:
                 self.ui.blank()
 
-            return "".join(full_text).strip() or None
+            result_text = _strip_thinking("".join(full_text)) or None
+
+            # Emit completion event for TUI
+            if method_hint and result_text:
+                self._emit_event("ai_call_completed", {
+                    "method": method_hint,
+                    "context": context_hint,
+                    "response": result_text,
+                })
+
+            return result_text
 
         except Exception as e:
             if self.ui:
@@ -147,7 +181,8 @@ class AIEngine:
             f"Response Headers: {json.dumps(dict(list(headers.items())[:15]))}\n"
             f"Body snippet (first 500 chars):\n{body_snippet[:500]}"
         )
-        return self._call(system, user, max_tokens=400)
+        return self._call(system, user, max_tokens=400,
+                          method_hint="analyze_endpoint", context_hint=url)
 
     def suggest_payloads(self, param: str, url: str,
                          vuln_type: str = "xss") -> list[str]:
@@ -172,7 +207,9 @@ class AIEngine:
             "Consider the param name when choosing payloads. "
             "Return ONLY a valid JSON array."
         )
-        result = self._call(system, user, max_tokens=500)
+        result = self._call(system, user, max_tokens=500,
+                             method_hint="suggest_payloads",
+                             context_hint=f"{vuln_type} — {param}")
         if result:
             try:
                 start = result.find("[")
@@ -200,7 +237,8 @@ class AIEngine:
             "Use bullet points. Focus only on exploitable findings."
         )
         user = f"JS file: {url}\n\nContent (first 3000 chars):\n{content[:3000]}"
-        return self._call(system, user, max_tokens=700)
+        return self._call(system, user, max_tokens=700,
+                          method_hint="analyze_js_content", context_hint=url)
 
     def analyze_headers(self, url: str, headers: dict,
                         missing: list[str]) -> str | None:
@@ -221,8 +259,8 @@ class AIEngine:
             f"Present headers: {json.dumps(dict(list(headers.items())[:20]))}\n"
             f"Missing security headers: {missing}"
         )
-        return self._call(system, user, max_tokens=500)
-
+        return self._call(system, user, max_tokens=500,
+                          method_hint="analyze_headers", context_hint=url)
     def analyze_idor_response(self, url: str, response_body: str,
                                id_value: str) -> dict | None:
         """
@@ -242,7 +280,8 @@ class AIEngine:
             f"ID tested: {id_value}\n"
             f"Response body (first 1000 chars):\n{response_body[:1000]}"
         )
-        result = self._call(system, user, max_tokens=150)
+        result = self._call(system, user, max_tokens=150,
+                             method_hint="analyze_idor_response", context_hint=url)
         if result:
             try:
                 start = result.find("{")
@@ -269,7 +308,8 @@ class AIEngine:
             f"URL: {url}\nParameter: {param}\n"
             f"Error / Response snippet:\n{error_text[:800]}"
         )
-        return self._call(system, user, max_tokens=400)
+        return self._call(system, user, max_tokens=400,
+                          method_hint="analyze_sqli_error", context_hint=f"{param} @ {url}")
 
     def analyze_cors(self, url: str, origin: str, acao: str,
                      acac: str) -> str | None:
@@ -286,7 +326,8 @@ class AIEngine:
             f"Access-Control-Allow-Origin: {acao}\n"
             f"Access-Control-Allow-Credentials: {acac}"
         )
-        return self._call(system, user, max_tokens=300)
+        return self._call(system, user, max_tokens=300,
+                          method_hint="analyze_cors", context_hint=url)
 
     def suggest_ssrf_payloads(self, param: str, url: str) -> list[str]:
         """Ask AI for target-aware SSRF bypass payloads. Returns a list of strings."""
@@ -298,7 +339,8 @@ class AIEngine:
             "cloud metadata). No explanations."
         )
         user = f"Parameter: {param}\nTarget: {url}\nReturn 8 payloads as a JSON array."
-        result = self._call(system, user, max_tokens=400)
+        result = self._call(system, user, max_tokens=400,
+                             method_hint="suggest_ssrf_payloads", context_hint=f"{param} @ {url}")
         if result:
             try:
                 start = result.find("[")
@@ -323,7 +365,8 @@ class AIEngine:
             f"URL: {url}\nPayload: {payload}\n"
             f"Response (first 800 chars):\n{body_snippet[:800]}"
         )
-        result = self._call(system, user, max_tokens=150)
+        result = self._call(system, user, max_tokens=150,
+                             method_hint="analyze_ssrf_response", context_hint=url)
         if result:
             try:
                 start = result.find("{")
@@ -344,7 +387,8 @@ class AIEngine:
             "test (auth, user data, file ops, admin), and any batching/DoS risk. Be brief."
         )
         user = f"Endpoint: {url}\nSchema (first 2000 chars):\n{schema_snippet[:2000]}"
-        return self._call(system, user, max_tokens=400)
+        return self._call(system, user, max_tokens=400,
+                          method_hint="analyze_graphql", context_hint=url)
 
     def analyze_smuggling(self, url: str, headers: dict) -> str | None:
         """Assess request-smuggling exposure from front-end/proxy headers."""
@@ -356,7 +400,8 @@ class AIEngine:
             "front-end/back-end pairing is implied. Be concise."
         )
         user = f"URL: {url}\nHeaders: {json.dumps(dict(list(headers.items())[:20]))}"
-        return self._call(system, user, max_tokens=300)
+        return self._call(system, user, max_tokens=300,
+                          method_hint="analyze_smuggling", context_hint=url)
 
     def validate_secret(self, label: str, snippet: str) -> dict | None:
         """Judge whether an exposed-file snippet contains a real secret. Returns dict."""
@@ -369,7 +414,8 @@ class AIEngine:
             '{"is_secret": true/false, "confidence": "high/medium/low", "reason": "one sentence"}'
         )
         user = f"File type: {label}\nContent (first 800 chars):\n{snippet[:800]}"
-        result = self._call(system, user, max_tokens=150)
+        result = self._call(system, user, max_tokens=150,
+                             method_hint="validate_secret", context_hint=label)
         if result:
             try:
                 start = result.find("{")
@@ -399,7 +445,9 @@ class AIEngine:
         )
         sample = endpoints[:80]
         user   = "Endpoints:\n" + "\n".join(sample)
-        result = self._call(system, user, max_tokens=1000)
+        result = self._call(system, user, max_tokens=1000,
+                             method_hint="prioritize_endpoints",
+                             context_hint=f"{len(endpoints)} endpoints")
         if result:
             try:
                 start = result.find("[")
@@ -447,7 +495,9 @@ class AIEngine:
                 "Identify all chaining opportunities, the highest-impact attack path, "
                 "estimated bounty ranges, and top 3 PoC outlines."
             )
-            result = self._call(system, user, max_tokens=3000)
+            result = self._call(system, user, max_tokens=3000,
+                                method_hint="analyze_chains",
+                                context_hint=f"{len(findings)} findings")
             if result:
                 self._print_ai(result)
                 return result
@@ -482,7 +532,8 @@ class AIEngine:
                 f"Findings:\n{detail}\n\n"
                 "Write a complete, professional bug bounty report in Markdown."
             )
-            return self._call(system, user, max_tokens=6000)
+            return self._call(system, user, max_tokens=6000,
+                              method_hint="generate_report", context_hint=target)
         return None
 
     # =========================================================================
@@ -508,8 +559,7 @@ class AIEngine:
             "top_p": 0.95,
             "stream": True,
         }
-        if _supports_thinking(config.get_model()):
-            payload["chat_template_kwargs"] = {"enable_thinking": True}
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
         try:
             resp = _requests.post(
                 NVIDIA_INVOKE_URL,

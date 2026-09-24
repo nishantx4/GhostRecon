@@ -26,34 +26,48 @@ class BrokenAuthModule(BaseModule):
         tracking_names = ["_ga", "_gid", "_fbp", "__utm", "_hj"]
 
         endpoints = [self.base_url] + self.ctx.get("endpoints", [])[:10]
-        
+        seen_cookie_names = set()  # avoid re-flagging the same cookie at every endpoint
+
         for endpoint in endpoints:
             try:
                 resp = s.get(endpoint, timeout=self.timeout)
-                
-                # Check cookies
-                for cookie in s.cookies:
+
+                # Only inspect cookies THIS response actually set. `s.cookies`
+                # is the session-wide jar — it keeps accumulating every cookie
+                # ever seen, so checking it on every iteration re-flags the
+                # same cookie (set once on the first request) at every
+                # subsequent endpoint's URL, producing near-duplicate findings.
+                for cookie in resp.cookies:
                     name_lower = cookie.name.lower()
-                    
+
                     # Skip known tracking cookies
                     if any(name_lower.startswith(t) for t in tracking_names):
                         continue
-                        
+
                     # Check if it looks like a session cookie
                     if any(s_name in name_lower for s_name in session_names):
+                        if cookie.name in seen_cookie_names:
+                            continue
+                        seen_cookie_names.add(cookie.name)
+
                         issues = []
-                        
+
                         if not cookie.has_nonstandard_attr('HttpOnly'):
                             issues.append("Missing HttpOnly")
-                        
+
                         if not cookie.secure and endpoint.startswith('https'):
                             issues.append("Missing Secure")
-                            
+
                         samesite = cookie.get_nonstandard_attr('SameSite')
                         if not samesite:
                             issues.append("Missing SameSite")
-                        
+
                         if issues:
+                            # Redact the actual token value — it's a live
+                            # credential and shouldn't be persisted verbatim
+                            # into JSON/Markdown report output.
+                            value = cookie.value or ""
+                            redacted = (value[:4] + "…" + value[-4:]) if len(value) > 10 else "(short value)"
                             self.db.add(
                                 title=f"Broken Auth — Insecure Session Cookie ({cookie.name})",
                                 severity="high", url=endpoint, module=self.NAME,
@@ -66,7 +80,7 @@ class BrokenAuthModule(BaseModule):
                                 confidence="HIGH",
                                 confidence_score=85,
                                 validation_steps=["cookie_analyzed", "flags_missing"],
-                                evidence=[f"Cookie: {cookie.name}={cookie.value}"]
+                                evidence=[f"Cookie: {cookie.name}={redacted}", f"Missing: {', '.join(issues)}"]
                             )
                             self.ui.find("high", f"Insecure Session Cookie: {cookie.name}", endpoint)
                             found += 1
